@@ -14,7 +14,7 @@ param(
     [string] $MsiRoot = 'dist/windows-gui/msi',
     [string] $Repository = 'XIAZY/notty',
     [string] $ZigVersion = '0.16.0',
-    [string] $BuilderImage = 'alphatoad/notty:windows-builder'
+    [string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'
 )
 
 Set-StrictMode -Version Latest

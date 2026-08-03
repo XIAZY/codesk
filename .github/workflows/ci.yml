@@ -11,8 +11,8 @@
 #   frontend production build          -> frontend: "Production build"
 #   git diff --check                   -> diff-check
 #   Windows GNU compile/link           -> windows-daemon-build
-#   Windows WiX compile/link           -> REMOVED 2026-07-31 (no Windows runner; see task #21)
-#   Windows installer lifecycle         -> windows-daemon-installer
+#   Windows WiX validation + MSI lifecycle -> windows-daemon
+#   Windows PowerShell daemon installer -> windows-daemon-installer
 #   Windows native runtime tests        -> windows-daemon
 #   macOS native cgo + unsigned universal release -> macos-desktop (opt-in until runner capacity exists)
 #
@@ -38,6 +38,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder
 
 jobs:
   backend:
@@ -286,6 +289,7 @@ jobs:
           done
       - name: Verify CGO-free desktop state boundary
         run: scripts/test-desktopstate-boundary.sh
+
   windows-daemon-installer:
     name: Windows daemon installer
     runs-on: windows-latest
@@ -296,83 +300,184 @@ jobs:
         shell: pwsh
         run: scripts/test-daemon-installer-windows.ps1
 
+  builder-key:
+    name: Resolve Windows builder image
+    runs-on: [self-hosted, Linux, ARM64]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive image tag from the complete build context
+        id: image
+        shell: bash
+        run: |
+          image_hash="$({
+            sha256sum deploy/windows-desktop/Dockerfile
+            sha256sum deploy/windows-desktop/Codesk.wixproj
+          } | sha256sum | cut -d ' ' -f 1)"
+          printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
+
+  builder-image:
+    name: Windows builder image (${{ matrix.image_arch }})
+    needs: builder-key
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner_arch: X64
+            image_arch: amd64
+          - runner_arch: ARM64
+            image_arch: arm64
+    runs-on: [self-hosted, Windows, "${{ matrix.runner_arch }}"]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check immutable architecture image
+        id: image
+        shell: powershell
+        run: |
+          $tag = "${{ needs.builder-key.outputs.image }}-${{ matrix.image_arch }}"
+          $savedPreference = $ErrorActionPreference
+          $ErrorActionPreference = "SilentlyContinue"
+          & docker manifest inspect $tag *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = $savedPreference
+          "build=$((-not $exists).ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($exists) {
+            Write-Host "Reusing immutable Windows builder image $tag"
+          }
+      - name: Build and push changed Windows builder image
+        if: steps.image.outputs.build == 'true'
+        shell: powershell
+        run: |
+          $tag = "${{ needs.builder-key.outputs.image }}-${{ matrix.image_arch }}"
+          ./scripts/build-windows-gui-builder-image.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage $tag
+          docker push $tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  builder-manifest:
+    name: Publish Windows builder manifest
+    needs: [builder-key, builder-image]
+    permissions:
+      packages: write
+    runs-on: [self-hosted, Linux, ARM64]
+    outputs:
+      image: ${{ steps.ci-image.outputs.image }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable multi-architecture image
+        shell: bash
+        env:
+          IMAGE: ${{ needs.builder-key.outputs.image }}
+        run: |
+          docker manifest rm "$IMAGE" >/dev/null 2>&1 || true
+          docker manifest create "$IMAGE" "$IMAGE-amd64" "$IMAGE-arm64"
+          docker manifest push --purge "$IMAGE"
+          docker manifest inspect "$IMAGE" >/dev/null
+      - name: Promote the landed build context to latest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          IMAGE: ${{ needs.builder-key.outputs.image }}
+        run: |
+          latest="$WINDOWS_BUILDER_REPOSITORY:latest"
+          docker manifest rm "$latest" >/dev/null 2>&1 || true
+          docker manifest create "$latest" "$IMAGE-amd64" "$IMAGE-arm64"
+          docker manifest push --purge "$latest"
+          docker manifest inspect "$latest" >/dev/null
+      - name: Resolve the published image used by Windows CI
+        id: ci-image
+        shell: bash
+        env:
+          EXACT_IMAGE: ${{ needs.builder-key.outputs.image }}
+        run: |
+          latest="$WINDOWS_BUILDER_REPOSITORY:latest"
+          if docker manifest inspect "$latest" >/dev/null 2>&1; then
+            image="$latest"
+          else
+            # The repository package does not exist before its first landed build.
+            image="$EXACT_IMAGE"
+          fi
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+
   windows-daemon:
-    name: Windows daemon (native Zig build + platform tests)
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: Windows daemon (native build + platform tests)
+    needs: builder-manifest
+    permissions:
+      contents: read
+      packages: read
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: actions/setup-go@v5
+          fetch-depth: 0
+      - uses: docker/login-action@v3
         with:
-          go-version-file: go.mod
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-      - name: Expose 7-Zip for release packaging
-        shell: pwsh
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve runner architecture
+        id: native
+        shell: powershell
         run: |
-          $sevenZip = Join-Path $env:ProgramFiles "7-Zip"
-          if (-not (Test-Path (Join-Path $sevenZip "7z.exe") -PathType Leaf)) {
-            throw "7-Zip is required to package the Windows release"
+          switch ("${{ runner.arch }}") {
+            "X64" { "go_arch=amd64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
+            "ARM64" { "go_arch=arm64" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
           }
-          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu,aarch64-pc-windows-gnullvm
-      - name: Cache cargo + Windows libyrs build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            third_party/y-crdt/target
-          key: yffi-windows-zig-${{ hashFiles('third_party/y-crdt/**/Cargo.lock') }}
-          restore-keys: |
-            yffi-windows-zig-
-      - name: Build canonical Windows release
-        shell: bash
-        env:
-          PLATFORMS: windows/amd64 windows/arm64
+      - name: Pull the published Windows builder image
+        id: builder
+        shell: powershell
         run: |
-          release_dir="$(cygpath -u "$RUNNER_TEMP")/notty-release"
-          scripts/build-daemon-release.sh "$release_dir"
-      - name: Verify canonical Windows release
-        shell: pwsh
-        run: |
-          $release_version = & ./scripts/read-daemon-version.ps1
-          go run ./scripts/verify-windows-daemon-release.go "$env:RUNNER_TEMP/notty-release/$release_version" $release_version
-      - name: PowerShell installer tests
-        shell: pwsh
-        run: scripts/test-daemon-installer-windows.ps1
-      - name: Stage AMD64 Yrs library for native tests
-        shell: bash
-        run: RUST_TARGET=x86_64-pc-windows-gnu RUSTFLAGS="-C panic=abort" scripts/build-yffi.sh
-      - name: Run Windows-native syncer suite and require platform rows
-        shell: pwsh
-        env:
-          CC: zig cc -target x86_64-windows-gnu
-          CGO_ENABLED: "1"
-        run: |
-          $legacyFiles = @(
-            "daemon/internal/syncer/file_lock.go",
-            "daemon/internal/syncer/file_lock_unix.go",
-            "daemon/internal/syncer/file_lock_windows.go"
-          )
-          foreach ($file in $legacyFiles) {
-            if (Test-Path $file) {
-              throw "retired target byte-lock file returned: $file"
-            }
+          $imageRef = "${{ needs.builder-manifest.outputs.image }}"
+          docker pull $imageRef
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $imageId = (& docker image inspect $imageRef --format '{{.Id}}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $imageId -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            throw "Could not resolve the pulled Windows builder image ID: $imageId"
           }
-          $legacySymbols = Get-ChildItem daemon/internal/syncer -Filter *.go |
-            Select-String -Pattern '\b(readFileLocked|appendFileLocked|appendOpenFileLocked|writeIfChanged|writeFileLocked|lockFile|unlockFile|CreateOrRead)\b'
-          if ($legacySymbols) {
-            $legacySymbols | ForEach-Object { Write-Host $_ }
-            throw "retired target byte-lock API returned"
+          "image_id=$imageId" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Build and ICE-validate Windows payloads and MSIs in the builder image
+        shell: powershell
+        run: |
+          ./scripts/run-windows-gui-container.ps1 `
+            -Target windows-gui-deploy `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage "${{ steps.builder.outputs.image_id }}"
+      - name: Install, verify, and uninstall the runner-native MSI
+        shell: powershell
+        run: |
+          $architecture = "${{ steps.native.outputs.go_arch }}"
+          ./scripts/test-windows-desktop-msi-lifecycle.ps1 `
+            -ReleaseDirectory (Join-Path "${{ github.workspace }}" "dist\windows-gui\msi\$architecture") `
+            -PayloadDirectory (Join-Path "${{ github.workspace }}" "dist\windows-gui\payload\$architecture") `
+            -GoArchitecture $architecture `
+            -ExpectedVersion ((& ./scripts/read-daemon-version.ps1).Trim())
+      - name: Run the image-built Windows-native syncer suite
+        shell: powershell
+        run: |
+          $architecture = "${{ steps.native.outputs.go_arch }}"
+          $testBinary = Join-Path "${{ github.workspace }}" "dist\windows-gui\tests\notty-syncer-$architecture.test.exe"
+          if (-not (Test-Path -LiteralPath $testBinary -PathType Leaf)) {
+            throw "Windows syncer test binary is missing: $testBinary"
           }
-
-          $output = & go test -race -count=1 -v ./daemon/internal/syncer 2>&1
+          $output = & $testBinary -test.count=1 -test.v 2>&1
           $testExit = $LASTEXITCODE
           $output | ForEach-Object { Write-Host $_ }
           if ($testExit -ne 0) { exit $testExit }
@@ -409,10 +514,10 @@ jobs:
           )
           foreach ($test in $required) {
             if (-not ($output -match "--- PASS: $test")) {
-              Write-Error "Required Windows platform test did not PASS: $test"
-              exit 1
+              throw "Required Windows platform test did not PASS: $test"
             }
           }
+
   regression-e2e:
     name: regression e2e (docker-compose fs<->DB<->daemon sync)
     runs-on: [self-hosted, Linux, ARM64]

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string] $RepositoryRoot = '',
-    [string] $BuilderImage = 'alphatoad/notty:windows-builder'
+    [string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'
 )
 
 Set-StrictMode -Version Latest

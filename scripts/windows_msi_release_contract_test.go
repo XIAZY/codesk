@@ -476,57 +476,135 @@ func checkBuildDeployContractCIGate(workflow string) error {
 	return nil
 }
 
-func TestWindowsMSICIStaysRemoved(t *testing.T) {
+func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	lifecycleData, err := os.ReadFile("test-windows-desktop-msi-lifecycle.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	workflow := normalizeSourceNewlines(string(workflowData))
-	if err := checkWindowsMSICIDisabled(workflow); err != nil {
+	lifecycle := normalizeSourceNewlines(string(lifecycleData))
+	if err := checkWindowsMSICILifecycle(workflow, lifecycle); err != nil {
 		t.Fatal(err)
 	}
 
-	// Each mutation reintroduces one piece of the deleted subgraph. The guard has to reject every
-	// one individually: bringing back the job, either half of the artifact handoff, or the payload
-	// name is enough to refill the quota and start failing unrelated rows again.
 	for _, mutation := range []struct {
-		name, reintroduced string
+		name, target, old, replacement string
 	}{
-		{"MSI job returns", "\n  windows-desktop-msi:\n    name: Windows desktop MSI\n"},
-		{"upload step returns", "\n      - uses: actions/upload-artifact@v4\n"},
-		{"download step returns", "\n      - uses: actions/download-artifact@v4\n"},
-		{"payload artifact name returns", "\n          name: windows-desktop-payload-amd64\n"},
+		{"published builder image not pulled", "workflow", `docker pull $imageRef`, `Write-Host "builder pull skipped"`},
+		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "${{ needs.builder-manifest.outputs.image }}"`},
+		{"container does not perform WiX deploy", "workflow", `-Target windows-gui-deploy`, `-Target windows-gui-build`},
+		{"lifecycle not invoked", "workflow", `./scripts/test-windows-desktop-msi-lifecycle.ps1`, `Write-Host "MSI lifecycle skipped"`},
+		{"release install removed", "lifecycle", `Invoke-Msi -Operation install -Package $release.release.MsiPath`, `Write-Host "release install skipped"`},
+		{"release uninstall removed", "lifecycle", `Invoke-Msi -Operation uninstall -Package $release.release.MsiPath`, `Write-Host "release uninstall skipped"`},
+		{"installed payload hash not checked", "lifecycle", `installed Codesk.exe does not match the validated payload`, `installed Codesk.exe was not checked`},
+		{"checksum inventory not parsed", "lifecycle", `Get-Content -LiteralPath $checksumsPath`, `@()`},
+		{"post-uninstall registry state not checked", "lifecycle", `release uninstall left component registry state`, `component registry state was not checked`},
+		{"installed binary not executed", "lifecycle", `$installedAgentTool --version`, `$ExpectedVersion`},
+		{"quiet install removed", "lifecycle", `'/qn'`, `'/passive'`},
+		{"restart suppression removed", "lifecycle", `'/norestart'`, `'/forcerestart'`},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
-			if strings.Contains(workflow, mutation.reintroduced) {
-				t.Fatalf("mutation target %q is already present; the guard proves nothing", mutation.reintroduced)
+			mutatedWorkflow, mutatedLifecycle := workflow, lifecycle
+			var source *string
+			switch mutation.target {
+			case "workflow":
+				source = &mutatedWorkflow
+			case "lifecycle":
+				source = &mutatedLifecycle
+			default:
+				t.Fatalf("unsupported mutation target %q", mutation.target)
 			}
-			mutated := workflow + mutation.reintroduced
-			if err := checkWindowsMSICIDisabled(mutated); err == nil {
-				t.Fatal("reintroducing removed Windows MSI CI plumbing passed the guard")
+			if strings.Count(*source, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique", mutation.old)
+			}
+			*source = strings.Replace(*source, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsMSICILifecycle(mutatedWorkflow, mutatedLifecycle); err == nil {
+				t.Fatal("Windows MSI lifecycle mutation passed")
 			}
 		})
 	}
+
+	mutated := workflow + "\n      - uses: actions/upload-artifact@v4\n"
+	if err := checkWindowsMSICILifecycle(mutated, lifecycle); err == nil {
+		t.Fatal("artifact-quota handoff mutation passed")
+	}
 }
 
-func checkWindowsMSICIDisabled(workflow string) error {
-	// The windows-desktop-msi job was deleted on 2026-07-31: it was `if: false` for want of a
-	// Windows ARM64 runner, so its two payload uploads ran on every build for a consumer that
-	// could never execute, filling the artifact quota and failing unrelated rows. The old
-	// contract asserted the job existed and stayed disabled; the property is now stronger — it
-	// must not exist at all, and neither must the artifact plumbing that fed it. Rebuilding MSI
-	// means rebuilding its handoff deliberately (task #21), not having it reappear unnoticed.
+func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
+	job, err := windowsNativeCIJob(workflow)
+	if err != nil {
+		return err
+	}
+	for required, count := range map[string]int{
+		"fetch-depth: 0": 1,
+		`$imageRef = "${{ needs.builder-manifest.outputs.image }}"`: 1,
+		`docker pull $imageRef`: 1,
+		"- name: Build and ICE-validate Windows payloads and MSIs in the builder image": 1,
+		`./scripts/run-windows-gui-container.ps1`:                                       1,
+		`-Target windows-gui-deploy`:                                                    1,
+		`-BuilderImage "${{ steps.builder.outputs.image_id }}"`:                         1,
+		"- name: Install, verify, and uninstall the runner-native MSI":                  1,
+		`./scripts/test-windows-desktop-msi-lifecycle.ps1`:                              1,
+		`dist\windows-gui\msi\$architecture`:                                            1,
+		`dist\windows-gui\payload\$architecture`:                                        1,
+	} {
+		if got := strings.Count(job, required); got != count {
+			return fmt.Errorf("Windows MSI CI source count for %q = %d, want %d", required, got, count)
+		}
+	}
 	for _, forbidden := range []string{
-		"  windows-desktop-msi:\n",
 		"actions/upload-artifact",
 		"actions/download-artifact",
-		"windows-desktop-payload-",
+		"actions/setup-dotnet",
+		"Install runner-native LLVM-MinGW toolchain",
 	} {
 		if strings.Contains(workflow, forbidden) {
-			return fmt.Errorf("removed Windows MSI CI plumbing reappeared in ci.yml: %q", forbidden)
+			return fmt.Errorf("Windows MSI CI reintroduced artifact-quota plumbing %q", forbidden)
+		}
+	}
+	for required, count := range map[string]int{
+		"-BuildMode 'release' -Publishable $true -Roles @('release')":                 1,
+		"Get-FileHash -LiteralPath $msiPath -Algorithm SHA256":                        1,
+		"Get-Content -LiteralPath $checksumsPath":                                     1,
+		"SHA256SUMS does not match provenance for $name":                              1,
+		"Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\msiexec.exe')": 1,
+		"$verb = if ($Operation -ceq 'install') { '/i' } else { '/x' }":               1,
+		"'/qn'":        1,
+		"'/norestart'": 1,
+		"'/l*v'":       1,
+		"installed Codesk.exe does not match the validated payload":         1,
+		"installed agent tool does not match the validated payload":         1,
+		"$installedAgentTool --version":                                     1,
+		"Start Menu shortcut targets the wrong executable":                  1,
+		"Codesk component registration is missing":                          1,
+		"Invoke-Msi -Operation install -Package $release.release.MsiPath":   1,
+		"Invoke-Msi -Operation uninstall -Package $release.release.MsiPath": 1,
+		"release uninstall left the install directory":                      1,
+		"release uninstall left component registry state":                   1,
+	} {
+		if got := strings.Count(lifecycle, required); got != count {
+			return fmt.Errorf("Windows MSI lifecycle source count for %q = %d, want %d", required, got, count)
 		}
 	}
 	return nil
+}
+
+func windowsNativeCIJob(workflow string) (string, error) {
+	const start = "\n  windows-daemon:\n"
+	const end = "\n  regression-e2e:\n"
+	startAt := strings.Index(workflow, start)
+	if startAt < 0 {
+		return "", fmt.Errorf("Windows native workflow has no windows-daemon job")
+	}
+	endOffset := strings.Index(workflow[startAt+len(start):], end)
+	if endOffset < 0 {
+		return "", fmt.Errorf("Windows native workflow has no job boundary after windows-daemon")
+	}
+	return workflow[startAt : startAt+len(start)+endOffset], nil
 }
 
 func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.T) {
@@ -552,11 +630,6 @@ func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.
 	mutations := []struct {
 		name, target, old, replacement string
 	}{
-		// The workflow-targeted mutations were removed with the MSI CI job on 2026-07-31 — their
-		// targets no longer exist in ci.yml, so they would fail on "source not unique" rather than
-		// prove anything. The builder mutations below are the ones with a live subject: they pin
-		// the source property that a test-only fixture can never be produced as publishable,
-		// which holds no matter how CI is later rewired.
 		{"fixture escapes testdata", "build", `testdata\windows-msi-upgrade-versions.ps1`, `windows-msi-upgrade-versions.ps1`},
 		{"fixture becomes default", "build", "[CmdletBinding(DefaultParameterSetName = 'Release')]", "[CmdletBinding(DefaultParameterSetName = 'TestOnlyUpgradeQa')]"},
 	}
@@ -567,8 +640,6 @@ func TestWindowsMSITestOnlyUpgradeFixtureCannotBecomeReleaseArtifact(t *testing.
 			switch mutation.target {
 			case "build":
 				source = &mutatedBuild
-			case "workflow":
-				source = &mutatedWorkflow
 			default:
 				t.Fatalf("unsupported mutation target %q", mutation.target)
 			}
@@ -609,14 +680,10 @@ func checkWindowsMSITestOnlyFixtureBoundary(build, fixture, workflow string) err
 		}
 	}
 
-	// The workflow half of this boundary is gone: the MSI CI job that ordered production/fixture/
-	// upload steps was deleted on 2026-07-31 (see checkWindowsMSICIDisabled). The builder and
-	// fixture assertions above are the half that still has a subject — they guard the SOURCE
-	// property (a test-only fixture can never be produced as publishable), which is what actually
-	// prevents a bad artifact regardless of how CI is wired. When MSI CI is rebuilt, its step
-	// isolation needs a fresh contract written against the new job rather than this one restored.
-	if workflow == "" {
-		return fmt.Errorf("workflow source is empty")
+	// Native CI installs the production release package. The synthetic pair remains a local
+	// builder fixture and cannot enter CI or publication accidentally.
+	if strings.Contains(workflow, "actions/upload-artifact") {
+		return fmt.Errorf("test-only MSI fixture is exposed to artifact upload")
 	}
 	return nil
 }
@@ -639,7 +706,7 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 	dockerfile := normalizeSourceNewlines(string(dockerfileData))
 
 	for source, want := range map[string]int{
-		"[string] $BuilderImage = 'alphatoad/notty:windows-builder'":                                        1,
+		"[string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'":                             1,
 		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
 		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
 		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
@@ -658,7 +725,7 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 		}
 	}
 	for source, want := range map[string]int{
-		"[string] $BuilderImage = 'alphatoad/notty:windows-builder'":                                        1,
+		"[string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'":                             1,
 		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
 		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
 		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
@@ -690,19 +757,24 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 		"https://github.com/git-for-windows/git/releases/download/": 1,
 		"https://github.com/mstorsjo/llvm-mingw/releases/download/": 1,
 		"Invoke-WebRequest -UseBasicParsing":                        1,
-		"x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm":          1,
-		"aarch64-w64-mingw32-clang.exe":                             1,
-		"x86_64-w64-mingw32-clang.exe":                              1,
-		"C:\\Windows\\System32\\msi.dll":                            1,
-		"dotnet restore C:\\toolchain-restore\\Codesk.wixproj":      1,
-		"wixtoolset.sdk\\4.0.5":                                     1,
-		"ENTRYPOINT [\"powershell.exe\"":                            1,
+		"$rustHost = if ($env:TARGETARCH.ToLowerInvariant() -ceq 'arm64') { 'aarch64-pc-windows-gnullvm' } else { 'x86_64-pc-windows-gnullvm' }": 1,
+		"--default-host $rustHost":                              1,
+		"$rustToolchain = $env:RUST_VERSION + '-' + $rustHost":  1,
+		"x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm":      1,
+		"$expectedRustHost = if ($expectedGoArch -ceq 'arm64')": 1,
+		"host: ' + $expectedRustHost":                           1,
+		"aarch64-w64-mingw32-clang.exe":                         1,
+		"x86_64-w64-mingw32-clang.exe":                          1,
+		"C:\\Windows\\System32\\msi.dll":                        1,
+		"dotnet restore C:\\toolchain-restore\\Codesk.wixproj":  1,
+		"wixtoolset.sdk\\4.0.5":                                 1,
+		"ENTRYPOINT [\"powershell.exe\"":                        1,
 	} {
 		if got := strings.Count(dockerfile, source); got != want {
 			t.Errorf("Windows toolchain Dockerfile source count for %q = %d, want %d", source, got, want)
 		}
 	}
-	for _, forbidden := range []string{"--isolation=hyperv", "nanoserver:", "windows/amd64"} {
+	for _, forbidden := range []string{"--isolation=hyperv", "nanoserver:", "windows/amd64", "--default-host x86_64-pc-windows-gnu"} {
 		if strings.Contains(builder, forbidden) || strings.Contains(wrapper, forbidden) || strings.Contains(dockerfile, forbidden) {
 			t.Errorf("Windows container build contains forbidden %q", forbidden)
 		}
@@ -753,6 +825,8 @@ func TestWindowsDesktopPayloadSourceContract(t *testing.T) {
 		{name: "shared DAEMON_VERSION reader bypassed", old: `build_version="$("$root_dir/scripts/read-daemon-version.sh")"`, new: `build_version="$(cat "$root_dir/DAEMON_VERSION")"`},
 		{name: "GUI subsystem dropped", old: `-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`, new: `-ldflags="-s -w"`},
 		{name: "agent payload omitted", old: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, new: `-o "$arch_payload_dir/notty-agent-tool.exe" ./daemon/cmd/codesk-desktop`},
+		{name: "AMD64 native tests lose race instrumentation", old: `test_race_flag=-race`, new: `test_race_flag=`},
+		{name: "native tests lose static external linking", old: `-ldflags="-linkmode external -extldflags '-static'"`, new: `-ldflags="-linkmode external"`},
 		{name: "cross build not marked as touching host yffi", old: `yffi_touched=1`, new: `yffi_touched=0`},
 		{name: "exit trap omitted", old: `trap cleanup EXIT`, new: `trap - EXIT`},
 	}
@@ -1242,9 +1316,13 @@ func checkWindowsDesktopPayloadSource(source string) error {
 		`yffi_touched=1`:                              1,
 		`cp -p "$host_yffi_link" "$host_yffi_backup"`: 1,
 		`cp -p "$host_yffi_backup" "$restore_tmp"`:    1,
-		`RUST_TARGET="$rust_target" RUSTFLAGS='-C panic=abort' scripts/build-yffi.sh`:                                              1,
-		`go vet ./daemon/internal/syncer ./internal/ycrdt`:                                                                         1,
-		`go test -c -o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer`:                                   1,
+		`RUST_TARGET="$rust_target" RUSTFLAGS='-C panic=abort' scripts/build-yffi.sh`: 1,
+		`go vet ./daemon/internal/syncer ./internal/ycrdt`:                            1,
+		`test_race_flag=-race`:                                1,
+		"test_race_flag=\n":                                   1,
+		`go test -c $test_race_flag`:                          1,
+		`-ldflags="-linkmode external -extldflags '-static'"`: 1,
+		`-o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer`:                                              1,
 		`go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop`: 1,
 		`go test -c -o "$test_dir/codesk-desktop-$architecture.test.exe" ./daemon/cmd/codesk-desktop`:                              1,
 		`-ldflags="-H=windowsgui -extldflags=-Wl,--subsystem,windows -X notty/daemon/internal/buildinfo.Version=$build_version"`:   1,
@@ -1459,7 +1537,7 @@ func checkWindowsMSIReleaseSource(build, orchestrator, makefile, shim string) er
 		"override MACOS_GUI_HOST_OS :=":                                                2,
 		`if [ "$(MACOS_GUI_HOST_OS)" != darwin ]; then`:                                2,
 		"-File make.ps1":                                                               4,
-		"WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder":                 1,
+		"WINDOWS_GUI_BUILDER_IMAGE ?= ghcr.io/xiazy/notty-windows-builder:latest":      1,
 		`"WINDOWS_GUI_BUILDER_IMAGE=$(WINDOWS_GUI_BUILDER_IMAGE)"`:                     2,
 		"-File make.ps1 windows-gui-build":                                             1,
 		"-File make.ps1 windows-gui-deploy":                                            1,

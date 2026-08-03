@@ -25,7 +25,7 @@ WINDOWS_GUI_PAYLOAD_ROOT ?= $(WINDOWS_GUI_ROOT)/payload
 WINDOWS_GUI_TEST_DIR ?= $(WINDOWS_GUI_ROOT)/tests
 WINDOWS_GUI_MSI_ROOT ?= $(WINDOWS_GUI_ROOT)/msi
 WINDOWS_GUI_REPOSITORY ?= XIAZY/notty
-WINDOWS_GUI_BUILDER_IMAGE ?= alphatoad/notty:windows-builder
+WINDOWS_GUI_BUILDER_IMAGE ?= ghcr.io/xiazy/notty-windows-builder:latest
 WINDOWS_GUI_ZIG_VERSION ?= 0.16.0
 
 .PHONY: dev dev-down dev-config-check prod-config-check \
@@ -145,7 +145,7 @@ windows-gui-build:
 
 windows-gui-deploy:
 	@printf '%s\n' 'windows-gui-deploy requires real Windows for WiX link and ICE validation; no GUI was deployed' >&2
-	@printf '%s\n' 'Windows MSI CI was removed 2026-07-31 (no Windows runner); rebuild it with task #21 before expecting CI evidence' >&2
+	@printf '%s\n' 'Use the Windows native CI workflow for published-builder MSI evidence' >&2
 	@exit 1
 endif
 

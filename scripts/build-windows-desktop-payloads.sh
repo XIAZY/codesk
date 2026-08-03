@@ -149,11 +149,13 @@ for architecture in $validated_architectures; do
 			rust_target=x86_64-pc-windows-gnu
 			zig_target=x86_64-windows-gnu
 			cc_command="${WINDOWS_GUI_CC_AMD64:-zig cc -target $zig_target}"
+			test_race_flag=-race
 			;;
 		arm64)
 			rust_target=aarch64-pc-windows-gnullvm
 			zig_target=aarch64-windows-gnu
 			cc_command="${WINDOWS_GUI_CC_ARM64:-zig cc -target $zig_target}"
+			test_race_flag=
 			;;
 	esac
 	arch_payload_dir="$payload_dir/$architecture"
@@ -164,7 +166,9 @@ for architecture in $validated_architectures; do
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go vet ./daemon/internal/syncer ./internal/ycrdt
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
-		go test -c -o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer
+		go test -c $test_race_flag \
+			-ldflags="-linkmode external -extldflags '-static'" \
+			-o "$test_dir/notty-syncer-$architecture.test.exe" ./daemon/internal/syncer
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \
 		go vet ./daemon/internal/desktopstate ./daemon/internal/desktop ./daemon/internal/desktopapp ./daemon/cmd/codesk-desktop
 	CC="$cc_command" CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" \

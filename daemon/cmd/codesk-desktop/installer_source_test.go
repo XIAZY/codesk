@@ -24,14 +24,10 @@ type wixElement struct {
 	Text    string       `xml:",chardata"`
 }
 
-// The Windows-MSI CI surface (the windows-desktop-msi job, its PowerShell steps, and the artifact
-// handoff that fed it) was deleted on 2026-07-31 — it was `if: false` for want of a Windows ARM64
-// runner while its uploads still ran every build, filling the artifact quota and failing unrelated
-// rows. What survives in CI is the architecture-bound payload BUILD inside windows-daemon-build,
-// which is what this now pins. The deleted job's step/shell/provenance assertions went with it;
-// rebuilding MSI CI (task #21) needs a contract written against the new job, not this one restored.
-// The platform-independent WiX/builder tests below are untouched — they protect local and native
-// construction regardless of CI.
+// The cross-build job compiles architecture-bound payloads without uploading them. The native
+// Windows workflow independently builds and ICE-validates the MSI inside the published builder
+// image, then installs the matching package on the host. This test pins the cross-build half; the
+// native image/install contract is checked separately below.
 func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 	path := filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml")
 	data, err := os.ReadFile(path)
@@ -71,6 +67,171 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
+	path := filepath.Join("..", "..", "..", ".github", "workflows", "ci.yml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(data)
+	if err := checkWindowsNativeCIContract(workflow); err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := []struct {
+		name        string
+		old         string
+		replacement string
+	}{
+		{"Dockerfile leaves image key", "sha256sum deploy/windows-desktop/Dockerfile", "printf Dockerfile"},
+		{"WiX project leaves image key", "sha256sum deploy/windows-desktop/Codesk.wixproj", "printf Codesk.wixproj"},
+		{"AMD64 builder removed", "image_arch: amd64", "image_arch: disabled-amd64"},
+		{"ARM64 builder removed", "image_arch: arm64", "image_arch: disabled-arm64"},
+		{"builder construction removed", "./scripts/build-windows-gui-builder-image.ps1", "Write-Host \"builder skipped\""},
+		{"architecture image not pushed", "docker push $tag", "Write-Host \"push skipped\""},
+		{"manifest drops ARM64", "docker manifest create \"$IMAGE\" \"$IMAGE-amd64\" \"$IMAGE-arm64\"", "docker manifest create \"$IMAGE\" \"$IMAGE-amd64\""},
+		{"latest can move on a PR", "if: github.event_name == 'push' && github.ref == 'refs/heads/main'", "if: always()"},
+		{"native job no longer waits for image", "needs: builder-manifest", "needs: builder-key"},
+		{"native job bypasses bootstrap-aware image resolution", "$imageRef = \"${{ needs.builder-manifest.outputs.image }}\"", "$imageRef = \"$WINDOWS_BUILDER_REPOSITORY:latest\""},
+		{"container reuses mutable tag after pull", "-BuilderImage \"${{ steps.builder.outputs.image_id }}\"", "-BuilderImage \"${{ needs.builder-manifest.outputs.image }}\""},
+		{"container deploy removed", "-Target windows-gui-deploy", "-Target windows-gui-build"},
+		{"native executable not run", "$output = & $testBinary -test.count=1 -test.v 2>&1", "Write-Host \"native suite skipped\""},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			if strings.Count(workflow, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique", mutation.old)
+			}
+			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
+			if err := checkWindowsNativeCIContract(mutated); err == nil {
+				t.Fatal("Windows-native image CI contract mutation passed")
+			}
+		})
+	}
+
+	payloadPath := filepath.Join("..", "..", "..", "scripts", "build-windows-desktop-payloads.sh")
+	payloadData, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(payloadData)
+	if err := checkWindowsNativeTestBuildContract(payload); err != nil {
+		t.Fatal(err)
+	}
+	mutated := strings.Replace(payload, "test_race_flag=-race", "test_race_flag=", 1)
+	if err := checkWindowsNativeTestBuildContract(mutated); err == nil {
+		t.Fatal("AMD64 race instrumentation removal mutation passed")
+	}
+}
+
+func checkWindowsNativeCIContract(workflow string) error {
+	for required, count := range map[string]int{
+		"name: CI":        1,
+		"packages: write": 2,
+		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder": 1,
+		"sha256sum deploy/windows-desktop/Dockerfile":                     1,
+		"sha256sum deploy/windows-desktop/Codesk.wixproj":                 1,
+		"image_arch: amd64": 1,
+		"image_arch: arm64": 1,
+		"runs-on: [self-hosted, Windows, \"${{ matrix.runner_arch }}\"]": 1,
+		"docker manifest inspect $tag *> $null":                          1,
+		"./scripts/build-windows-gui-builder-image.ps1":                  1,
+		"docker push $tag": 1,
+		"docker manifest create \"$IMAGE\" \"$IMAGE-amd64\" \"$IMAGE-arm64\"": 1,
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'":  1,
+		"image: ${{ steps.ci-image.outputs.image }}":                          1,
+		"latest=\"$WINDOWS_BUILDER_REPOSITORY:latest\"":                       2,
+		"if docker manifest inspect \"$latest\" >/dev/null 2>&1; then":        1,
+		"image=\"$EXACT_IMAGE\"":                                              1,
+	} {
+		if got := strings.Count(workflow, required); got != count {
+			return fmt.Errorf("Windows builder workflow source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	job, err := windowsNativeCIJob(workflow)
+	if err != nil {
+		return err
+	}
+	for required, count := range map[string]int{
+		"needs: builder-manifest":                                       1,
+		"packages: read":                                                1,
+		"runs-on: [self-hosted, Windows]":                               1,
+		"submodules: recursive":                                         1,
+		"fetch-depth: 0":                                                1,
+		"switch (\"${{ runner.arch }}\")":                               1,
+		"\"X64\" { \"go_arch=amd64\"":                                   1,
+		"\"ARM64\" { \"go_arch=arm64\"":                                 1,
+		"$imageRef = \"${{ needs.builder-manifest.outputs.image }}\"":   1,
+		"docker pull $imageRef":                                         1,
+		"docker image inspect $imageRef --format '{{.Id}}'":             1,
+		"image_id=$imageId":                                             1,
+		"./scripts/run-windows-gui-container.ps1":                       1,
+		"-Target windows-gui-deploy":                                    1,
+		"-BuilderImage \"${{ steps.builder.outputs.image_id }}\"":       1,
+		"./scripts/test-windows-desktop-msi-lifecycle.ps1":              1,
+		"dist\\windows-gui\\msi\\$architecture":                         1,
+		"dist\\windows-gui\\payload\\$architecture":                     1,
+		"dist\\windows-gui\\tests\\notty-syncer-$architecture.test.exe": 1,
+		"$output = & $testBinary -test.count=1 -test.v 2>&1":            1,
+		"$output -match \"--- PASS: $test\"":                            1,
+	} {
+		if got := strings.Count(job, required); got != count {
+			return fmt.Errorf("Windows-native CI source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	if strings.Contains(job, "packages: write") {
+		return fmt.Errorf("Windows-native test job has package write permission")
+	}
+	for _, forbidden := range []string{
+		"actions/setup-go",
+		"actions/setup-dotnet",
+		"dtolnay/rust-toolchain",
+		"Invoke-WebRequest",
+		"Install runner-native LLVM-MinGW toolchain",
+		"mlugg/setup-zig",
+	} {
+		if strings.Contains(job, forbidden) {
+			return fmt.Errorf("Windows-native test job reinstalls dependency %q outside the builder image", forbidden)
+		}
+	}
+	jobsAt := strings.Index(workflow, "\njobs:\n")
+	if jobsAt < 0 {
+		return fmt.Errorf("Windows-native workflow has no jobs section")
+	}
+	if strings.Contains(workflow[:jobsAt], "packages: write") {
+		return fmt.Errorf("Windows-native workflow grants package write permission outside publication jobs")
+	}
+	return nil
+}
+
+func checkWindowsNativeTestBuildContract(payload string) error {
+	for required, count := range map[string]int{
+		"test_race_flag=-race":                                  1,
+		"test_race_flag=\n":                                     1,
+		"go test -c $test_race_flag":                            1,
+		"-ldflags=\"-linkmode external -extldflags '-static'\"": 1,
+		"-o \"$test_dir/notty-syncer-$architecture.test.exe\"":  1,
+	} {
+		if got := strings.Count(payload, required); got != count {
+			return fmt.Errorf("Windows native test build source count for %q = %d, want %d", required, got, count)
+		}
+	}
+	return nil
+}
+func windowsNativeCIJob(workflow string) (string, error) {
+	const start = "\n  windows-daemon:\n"
+	const end = "\n  regression-e2e:\n"
+	startAt := strings.Index(workflow, start)
+	if startAt < 0 {
+		return "", fmt.Errorf("CI has no windows-daemon job")
+	}
+	endOffset := strings.Index(workflow[startAt+len(start):], end)
+	if endOffset < 0 {
+		return "", fmt.Errorf("CI has no job boundary after windows-daemon")
+	}
+	return workflow[startAt : startAt+len(start)+endOffset], nil
 }
 
 func TestWindowsInstallerReproducibilityScriptsAreFailClosed(t *testing.T) {
