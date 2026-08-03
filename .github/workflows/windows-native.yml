@@ -3,10 +3,6 @@ name: Windows native validation
 on:
   workflow_call:
     inputs:
-      builder_image:
-        description: Published Windows builder image to validate
-        required: true
-        type: string
       runner_labels:
         description: JSON runner labels; defaults to any native Windows runner
         required: false
@@ -45,7 +41,7 @@ jobs:
         id: builder
         shell: powershell
         run: |
-          $imageRef = "${{ inputs.builder_image }}"
+          $imageRef = "ghcr.io/xiazy/notty-windows-builder:latest"
           & docker pull $imageRef
           if ($LASTEXITCODE -ne 0) {
             throw "Could not pull the published Windows builder image $imageRef. Builder publication is owned by the merged-main Windows builder workflow."

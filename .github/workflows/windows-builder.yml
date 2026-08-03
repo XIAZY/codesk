@@ -1,6 +1,10 @@
 name: Windows builder image
 
 on:
+  pull_request:
+    paths:
+      - deploy/windows-desktop/Dockerfile
+      - deploy/windows-desktop/Codesk.wixproj
   push:
     branches: [main]
     paths:
@@ -8,8 +12,8 @@ on:
       - deploy/windows-desktop/Codesk.wixproj
 
 concurrency:
-  group: windows-builder-main
-  cancel-in-progress: false
+  group: windows-builder-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -35,12 +39,37 @@ jobs:
           } | sha256sum | cut -d ' ' -f 1)"
           printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
 
-  builder-image:
-    name: Windows builder image (native)
+  pr-builder-image:
+    name: Build Windows builder image (pull request)
+    if: github.event_name == 'pull_request'
+    needs: builder-key
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the native image platform
+        id: platform
+        shell: powershell
+        run: |
+          $architecture = switch ("${{ runner.arch }}") {
+            "X64" { "amd64" }
+            "ARM64" { "arm64" }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
+          }
+          "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Build the pull-request image locally
+        shell: powershell
+        run: |
+          ./scripts/build-windows-gui-builder-image.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage "${{ steps.platform.outputs.image }}"
+
+  main-builder-image:
+    name: Build and publish Windows builder image (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: builder-key
     outputs:
       image: ${{ steps.platform.outputs.image }}
-      runner_label: ${{ steps.platform.outputs.runner_label }}
     permissions:
       contents: read
       packages: write
@@ -57,14 +86,12 @@ jobs:
         id: platform
         shell: powershell
         run: |
-          $runnerLabel = "${{ runner.arch }}"
-          $architecture = switch ($runnerLabel) {
+          $architecture = switch ("${{ runner.arch }}") {
             "X64" { "amd64" }
             "ARM64" { "arm64" }
-            default { throw "Unsupported native Windows runner architecture: $runnerLabel" }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
           }
           "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "runner_label=$runnerLabel" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Check immutable architecture image
         id: image
         shell: powershell
@@ -79,8 +106,6 @@ jobs:
           if ($exists) {
             Write-Host "Reusing immutable Windows builder image $tag"
           }
-          # A missing manifest is expected for a newly merged build context.
-          # Clear the probe's native nonzero status after publishing the output.
           exit 0
       - name: Build and push changed Windows builder image
         if: steps.image.outputs.build == 'true'
@@ -95,8 +120,10 @@ jobs:
 
   builder-manifest:
     name: Publish Windows builder manifest
-    needs: [builder-key, builder-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: main-builder-image
     permissions:
+      contents: read
       packages: write
     runs-on: [self-hosted, Linux]
     steps:
@@ -105,30 +132,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Verify the immutable native Windows builder image
+      - name: Promote the published native image to latest
         shell: bash
         env:
-          ARCHITECTURE_IMAGE: ${{ needs.builder-image.outputs.image }}
+          ARCHITECTURE_IMAGE: ${{ needs.main-builder-image.outputs.image }}
         run: |
           docker manifest inspect "$ARCHITECTURE_IMAGE" >/dev/null
-      - name: Promote the landed build context to latest
-        shell: bash
-        env:
-          ARCHITECTURE_IMAGE: ${{ needs.builder-image.outputs.image }}
-        run: |
           latest="$WINDOWS_BUILDER_REPOSITORY:latest"
           docker manifest rm "$latest" >/dev/null 2>&1 || true
           docker manifest create "$latest" "$ARCHITECTURE_IMAGE"
           docker manifest push --purge "$latest"
           docker manifest inspect "$latest" >/dev/null
-
-  windows-native:
-    name: Validate published Windows builder image
-    needs: [builder-image, builder-manifest]
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/windows-native.yml
-    with:
-      builder_image: ghcr.io/xiazy/notty-windows-builder:latest
-      runner_labels: ${{ format('["self-hosted","Windows","{0}"]', needs.builder-image.outputs.runner_label) }}

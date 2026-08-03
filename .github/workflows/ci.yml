@@ -304,8 +304,6 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/windows-native.yml
-    with:
-      builder_image: ghcr.io/xiazy/notty-windows-builder:latest
 
   regression-e2e:
     name: regression e2e (docker-compose fs<->DB<->daemon sync)

@@ -140,17 +140,19 @@ components.
 Later product builds reuse the image and reject one whose Windows architecture
 does not match the Docker engine. To use another local or pre-pulled tag, set
 `WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
-same value. The dedicated Windows-builder workflow is the only package-write
-path. It runs only on a merged `main` push changing the Dockerfile or copied WiX
-project, schedules on any native Windows runner, derives the image architecture
-from `runner.arch`, builds and pushes that content tag, publishes its immutable
-manifest, and promotes it to `latest`. Its final job invokes the same read-only
-native validation used by pull-request CI, after promotion and on the discovered
-builder platform, so the new image receives the real MSI and Windows-platform
-acceptance without a cross-architecture scheduling race. Pull-request CI is not
-architecture-pinned: it consumes the existing `latest` manifest on any matching
-native Windows runner. There is no PR bootstrap or immutable-tag fallback. A
-missing published image fails validation instead of mutating the registry from
+same value. The dedicated Windows-builder workflow runs when the Dockerfile or
+copied WiX project changes. On pull requests it schedules any native Windows
+runner, derives the image architecture from `runner.arch`, and builds the image
+locally with read-only repository permissions. That job has no registry login,
+package-write permission, push, or manifest operation. After the same change is
+merged to `main`, separate main-only jobs build and push the immutable native
+content tag and promote it to `latest`.
+
+Windows-native validation remains a separate read-only workflow. Pull-request
+CI always pulls the existing `latest` registry manifest on any matching native
+Windows runner, pins the pulled image ID, and uses that image for MSI and
+Windows-platform acceptance. It never builds or publishes the builder image.
+A missing published image fails validation instead of mutating the registry from
 an unmerged revision.
 
 ```sh

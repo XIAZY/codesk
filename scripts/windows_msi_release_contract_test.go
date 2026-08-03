@@ -495,7 +495,7 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		name, target, old, replacement string
 	}{
 		{"published builder image not pulled", "workflow", `docker pull $imageRef`, `Write-Host "builder pull skipped"`},
-		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "${{ inputs.builder_image }}"`},
+		{"pulled image ID not pinned", "workflow", `-BuilderImage "${{ steps.builder.outputs.image_id }}"`, `-BuilderImage "ghcr.io/xiazy/notty-windows-builder:latest"`},
 		{"container does not perform WiX deploy", "workflow", `-Target windows-gui-deploy`, `-Target windows-gui-build`},
 		{"lifecycle not invoked", "workflow", `./scripts/test-windows-desktop-msi-lifecycle.ps1`, `Write-Host "MSI lifecycle skipped"`},
 		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' "-test.run=$runPattern" 2>&1`, `$output = & $testBinary -test.count=1 -test.v -test.run=$runPattern 2>&1`},
@@ -550,8 +550,8 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 	}
 	for required, count := range map[string]int{
 		"fetch-depth: 0": 1,
-		`$imageRef = "${{ inputs.builder_image }}"`: 1,
-		`docker pull $imageRef`:                     1,
+		`$imageRef = "ghcr.io/xiazy/notty-windows-builder:latest"`: 1,
+		`docker pull $imageRef`: 1,
 		"- name: Build and ICE-validate Windows payloads and MSIs in the builder image":  1,
 		`./scripts/run-windows-gui-container.ps1`:                                        1,
 		`-Target windows-gui-deploy`:                                                     1,
