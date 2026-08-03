@@ -705,25 +705,65 @@ func TestWindowsGUIContainerSourceContract(t *testing.T) {
 	wrapper := normalizeSourceNewlines(string(wrapperData))
 	dockerfile := normalizeSourceNewlines(string(dockerfileData))
 
-	for source, want := range map[string]int{
-		"[string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'":                             1,
-		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
-		"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
-		"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
-		"'run', '--rm', '--isolation=process'":                                                              1,
-		"docker image inspect $BuilderImage":                                                                2,
-		"scripts/build-windows-gui-builder-image.ps1":                                                       1,
-		"is not available; building it now":                                                                 1,
-		"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static":            1,
-		"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static":           1,
-		"third_party/y-crdt/Cargo.lock":                                                                     1,
-		"target=C:\\workspace":                                                                              1,
-		"scripts\\run-windows-gui-target.ps1":                                                               1,
-	} {
-		if got := strings.Count(wrapper, source); got != want {
-			t.Errorf("Windows container runner source count for %q = %d, want %d", source, got, want)
+	checkWrapper := func(source string) error {
+		for required, want := range map[string]int{
+			"[string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'":                             1,
+			"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
+			"[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()":                    1,
+			"Docker engine architecture $dockerArchitecture does not match host architecture $hostArchitecture": 1,
+			"'create', '--isolation=process'":                                                                   1,
+			"docker image inspect $BuilderImage":                                                                2,
+			"scripts/build-windows-gui-builder-image.ps1":                                                       1,
+			"is not available; building it now":                                                                 1,
+			"WINDOWS_GUI_CC_AMD64=C:/toolchains/llvm-mingw/bin/x86_64-w64-mingw32-clang.exe -static":            1,
+			"WINDOWS_GUI_CC_ARM64=C:/toolchains/llvm-mingw/bin/aarch64-w64-mingw32-clang.exe -static":           1,
+			"third_party/y-crdt/Cargo.lock":                                                                     1,
+			`("$root\.")`:                                                                                       1,
+			`"${containerId}:C:\workspace"`:                                                                     1,
+			"& docker start --attach $containerId":                                                              1,
+			"docker inspect $containerId --format '{{.State.ExitCode}}'":                                        1,
+			`"${containerId}:$containerSource"`:                                                                 1,
+			"& docker rm --force $containerId":                                                                  1,
+			"scripts\\run-windows-gui-target.ps1":                                                               1,
+		} {
+			if got := strings.Count(source, required); got != want {
+				return fmt.Errorf("Windows container runner source count for %q = %d, want %d", required, got, want)
+			}
 		}
+		for _, forbidden := range []string{"'run', '--rm'", "--mount", "type=bind"} {
+			if strings.Contains(source, forbidden) {
+				return fmt.Errorf("Windows container runner retains daemon-host-dependent source %q", forbidden)
+			}
+		}
+		return nil
 	}
+	if err := checkWrapper(wrapper); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "source directory nested instead of contents copied", old: `("$root\.")`, new: `$root`},
+		{name: "source copy omitted", old: `"${containerId}:C:\workspace"`, new: `"${containerId}:C:\missing"`},
+		{name: "container start detached", old: "& docker start --attach $containerId", new: "& docker start $containerId"},
+		{name: "container exit ignored", old: "docker inspect $containerId --format '{{.State.ExitCode}}'", new: "Write-Host 'container complete'"},
+		{name: "output copy omitted", old: `"${containerId}:$containerSource"`, new: `"${containerId}:C:/discarded"`},
+		{name: "container cleanup omitted", old: "& docker rm --force $containerId", new: "Write-Host 'container retained'"},
+		{name: "daemon-host bind restored", old: "# Docker cp streams through the client API", new: "# --mount type=bind bypasses Docker cp"},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if strings.Count(wrapper, mutation.old) != 1 {
+				t.Fatalf("wrapper mutation source %q is not unique", mutation.old)
+			}
+			mutated := strings.Replace(wrapper, mutation.old, mutation.new, 1)
+			if err := checkWrapper(mutated); err == nil {
+				t.Fatal("Windows container wrapper mutation passed")
+			}
+		})
+	}
+
 	for source, want := range map[string]int{
 		"[string] $BuilderImage = 'ghcr.io/xiazy/notty-windows-builder:latest'":                             1,
 		"docker info --format '{{.OSType}}|{{.Architecture}}|{{.OSVersion}}'":                               1,
