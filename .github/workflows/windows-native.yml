@@ -75,6 +75,15 @@ jobs:
           if (-not (Test-Path -LiteralPath $testBinary -PathType Leaf)) {
             throw "Windows syncer test binary is missing: $testBinary"
           }
+          $sourceContracts = & $testBinary '-test.list=^TestSourceContract_' 2>&1
+          $sourceContractListExit = $LASTEXITCODE
+          $sourceContracts | ForEach-Object { Write-Host $_ }
+          if ($sourceContractListExit -ne 0) {
+            throw "Could not inspect the Windows syncer test inventory (exit $sourceContractListExit)"
+          }
+          if ($sourceContracts -match '^TestSourceContract_') {
+            throw "Source-contract tests leaked into the source-less Windows binary: $($sourceContracts -join ', ')"
+          }
           $required = @(
             "TestWorkspaceFSAppendUsesCanonicalPathLease",
             "TestWorkspaceFSCreateEmptyOrReadCreatesAbsentFile",
