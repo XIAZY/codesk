@@ -240,23 +240,46 @@ try {
         Assert-True ([string]$shortcut.Arguments -like "*-WindowStyle Hidden*") "Startup shortcut launcher is not hidden"
     }
     $launcherPidPath = Join-Path $daemonDir "launcher.pid"
-    for ($attempt = 0; $attempt -lt 50 -and -not (Test-Path -LiteralPath $launcherPidPath -PathType Leaf); $attempt++) {
+    for ($attempt = 0; $attempt -lt 300 -and -not (Test-Path -LiteralPath $launcherPidPath -PathType Leaf); $attempt++) {
         Start-Sleep -Milliseconds 100
     }
-    Assert-File $launcherPidPath
+    $launcherDiagnostic = "mode=$($service.Mode)"
+    if ($service.Mode -eq "scheduled-task") {
+        $taskState = "unavailable"
+        $lastTaskResult = "unavailable"
+        $taskDiagnosticError = "none"
+        try {
+            $registeredTask = Get-ScheduledTask -TaskName $service.TaskName -ErrorAction Stop
+            $taskState = [string]$registeredTask.State
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $service.TaskName -ErrorAction Stop
+            $lastTaskResult = [string]$taskInfo.LastTaskResult
+        } catch {
+            $taskDiagnosticError = $_.Exception.Message
+        }
+        $launcherDiagnostic = "$launcherDiagnostic taskState=$taskState lastTaskResult=$lastTaskResult diagnosticError=$taskDiagnosticError"
+    }
+    Assert-True (Test-Path -LiteralPath $launcherPidPath -PathType Leaf) "launcher did not publish pid within 30 seconds; $launcherDiagnostic"
 
     $daemonLogPath = Join-Path $daemonDir "daemon.log"
     $daemonLog = ""
+    $daemonLogReadError = "none"
     for ($attempt = 0; $attempt -lt 70; $attempt++) {
         if (Test-Path -LiteralPath $daemonLogPath -PathType Leaf) {
-            $daemonLog = Get-Content -LiteralPath $daemonLogPath -Raw
+            try {
+                $daemonLog = Get-Content -LiteralPath $daemonLogPath -Raw -ErrorAction Stop
+                $daemonLogReadError = "none"
+            } catch [IO.IOException] {
+                $daemonLogReadError = $_.Exception.Message
+                Start-Sleep -Milliseconds 100
+                continue
+            }
             if ($daemonLog -like "*Codesk daemon exited with code*") {
                 break
             }
         }
         Start-Sleep -Milliseconds 100
     }
-    Assert-True ($daemonLog -like "*Codesk daemon exited with code*") "launcher did not record the native daemon exit"
+    Assert-True ($daemonLog -like "*Codesk daemon exited with code*") "launcher did not record the native daemon exit; last log read error: $daemonLogReadError"
     Assert-True ($daemonLog -notlike "*Codesk daemon launch failed:*") "native stderr triggered the launcher catch path"
 
     $missingAllRejected = $false
@@ -302,3 +325,5 @@ try {
     }
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+exit 0

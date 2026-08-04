@@ -32,17 +32,39 @@ var windowsMachines = map[string]uint16{
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "usage: go run ./scripts/verify-windows-daemon-release.go <version-dir> <version>\n")
+	if len(os.Args) != 3 && len(os.Args) != 4 {
+		fmt.Fprintf(os.Stderr, "usage: go run ./scripts/verify-windows-daemon-release.go <version-dir> <version> [architecture]\n")
 		os.Exit(2)
 	}
-	if err := verifyRelease(os.Args[1], os.Args[2]); err != nil {
+	expectedMachines, err := windowsMachinesForArchitecture("")
+	if len(os.Args) == 4 {
+		expectedMachines, err = windowsMachinesForArchitecture(os.Args[3])
+	}
+	if err == nil {
+		err = verifyReleaseMachines(os.Args[1], os.Args[2], expectedMachines)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "verify-windows-daemon-release: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func verifyRelease(versionDir, version string) error {
+	return verifyReleaseMachines(versionDir, version, windowsMachines)
+}
+
+func windowsMachinesForArchitecture(architecture string) (map[string]uint16, error) {
+	if architecture == "" {
+		return windowsMachines, nil
+	}
+	machine, ok := windowsMachines[architecture]
+	if !ok {
+		return nil, fmt.Errorf("unsupported Windows architecture %q", architecture)
+	}
+	return map[string]uint16{architecture: machine}, nil
+}
+
+func verifyReleaseMachines(versionDir, version string, expectedMachines map[string]uint16) error {
 	manifest, err := readManifest(filepath.Join(versionDir, "manifest.json"))
 	if err != nil {
 		return err
@@ -50,16 +72,16 @@ func verifyRelease(versionDir, version string) error {
 	if manifest.Version != version {
 		return fmt.Errorf("manifest version %q, want %q", manifest.Version, version)
 	}
-	if len(manifest.Artifacts) != len(windowsMachines) {
-		return fmt.Errorf("manifest has %d artifacts, want %d", len(manifest.Artifacts), len(windowsMachines))
+	if len(manifest.Artifacts) != len(expectedMachines) {
+		return fmt.Errorf("manifest has %d artifacts, want %d", len(manifest.Artifacts), len(expectedMachines))
 	}
 
 	checksums, err := readChecksums(filepath.Join(versionDir, "SHA256SUMS"))
 	if err != nil {
 		return err
 	}
-	if len(checksums) != len(windowsMachines) {
-		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(checksums), len(windowsMachines))
+	if len(checksums) != len(expectedMachines) {
+		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(checksums), len(expectedMachines))
 	}
 
 	artifacts := make(map[string]releaseArtifact, len(manifest.Artifacts))
@@ -67,7 +89,7 @@ func verifyRelease(versionDir, version string) error {
 		if artifact.OS != "windows" {
 			return fmt.Errorf("manifest contains non-Windows artifact %q", artifact.File)
 		}
-		if _, ok := windowsMachines[artifact.Arch]; !ok {
+		if _, ok := expectedMachines[artifact.Arch]; !ok {
 			return fmt.Errorf("manifest contains unsupported Windows architecture %q", artifact.Arch)
 		}
 		if _, exists := artifacts[artifact.Arch]; exists {
@@ -76,7 +98,7 @@ func verifyRelease(versionDir, version string) error {
 		artifacts[artifact.Arch] = artifact
 	}
 
-	for arch, machine := range windowsMachines {
+	for arch, machine := range expectedMachines {
 		artifact, ok := artifacts[arch]
 		if !ok {
 			return fmt.Errorf("manifest is missing windows/%s", arch)

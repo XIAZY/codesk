@@ -64,9 +64,10 @@ RUN Expand-Archive -LiteralPath C:\downloads\go.zip -DestinationPath C:\toolchai
 
 RUN if (Test-Path -LiteralPath $env:RUSTUP_HOME) { Remove-Item -LiteralPath $env:RUSTUP_HOME -Recurse -Force }; `
     if (Test-Path -LiteralPath $env:CARGO_HOME) { Remove-Item -LiteralPath $env:CARGO_HOME -Recurse -Force }; `
-    & C:\downloads\rustup-init.exe -y --no-modify-path --profile minimal --default-host x86_64-pc-windows-gnu --default-toolchain $env:RUST_VERSION; `
+    $rustHost = if ($env:TARGETARCH.ToLowerInvariant() -ceq 'arm64') { 'aarch64-pc-windows-gnullvm' } else { 'x86_64-pc-windows-gnullvm' }; `
+    & C:\downloads\rustup-init.exe -y --no-modify-path --profile minimal --default-host $rustHost --default-toolchain $env:RUST_VERSION; `
     if ($LASTEXITCODE -ne 0) { throw ('rustup-init failed with exit ' + $LASTEXITCODE) }; `
-    $rustToolchain = $env:RUST_VERSION + '-x86_64-pc-windows-gnu'; `
+    $rustToolchain = $env:RUST_VERSION + '-' + $rustHost; `
     rustup target add --toolchain $rustToolchain x86_64-pc-windows-gnu aarch64-pc-windows-gnullvm; `
     if ($LASTEXITCODE -ne 0) { throw ('rustup target add failed with exit ' + $LASTEXITCODE) }; `
     git config --system --add safe.directory C:/workspace
@@ -82,7 +83,8 @@ RUN $expectedGoArch = $env:TARGETARCH.ToLowerInvariant(); `
     if ((go version) -cnotmatch ('^go version go' + [regex]::Escape($env:GO_VERSION) + ' windows/')) { throw ('unexpected Go version: ' + (go version)) }; `
     if ((go env GOHOSTARCH).Trim() -cne $expectedGoArch) { throw ('Go host architecture does not match image: ' + (go env GOHOSTARCH)) }; `
     if ((rustc --version) -cnotmatch ('^rustc ' + [regex]::Escape($env:RUST_VERSION) + ' ')) { throw ('unexpected Rust version: ' + (rustc --version)) }; `
-    if ((rustc -vV | Select-String -SimpleMatch 'host: x86_64-pc-windows-gnu').Count -ne 1) { throw ('unexpected Rust host: ' + (rustc -vV)) }; `
+    $expectedRustHost = if ($expectedGoArch -ceq 'arm64') { 'aarch64-pc-windows-gnullvm' } else { 'x86_64-pc-windows-gnullvm' }; `
+    if ((rustc -vV | Select-String -SimpleMatch ('host: ' + $expectedRustHost)).Count -ne 1) { throw ('unexpected Rust host: ' + (rustc -vV)) }; `
     if ((zig version).Trim() -cne $env:ZIG_VERSION) { throw ('unexpected Zig version: ' + (zig version)) }; `
     if ((dotnet --version).Trim() -cne $env:DOTNET_VERSION) { throw ('unexpected .NET SDK version: ' + (dotnet --version)) }; `
     if ((git --version).Trim() -cne ('git version {0}.windows.{1}' -f $env:MINGIT_VERSION,$env:MINGIT_RELEASE)) { throw ('unexpected Git version: ' + (git --version)) }; `

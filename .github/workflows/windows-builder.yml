@@ -1,0 +1,145 @@
+name: Windows builder image
+
+on:
+  pull_request:
+    paths:
+      - deploy/windows-desktop/Dockerfile
+      - deploy/windows-desktop/Codesk.wixproj
+  push:
+    branches: [main]
+    paths:
+      - deploy/windows-desktop/Dockerfile
+      - deploy/windows-desktop/Codesk.wixproj
+
+concurrency:
+  group: windows-builder-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder
+
+jobs:
+  builder-key:
+    name: Resolve Windows builder image
+    runs-on: [self-hosted, Linux]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Derive image tag from the complete build context
+        id: image
+        shell: bash
+        run: |
+          image_hash="$({
+            sha256sum deploy/windows-desktop/Dockerfile
+            sha256sum deploy/windows-desktop/Codesk.wixproj
+          } | sha256sum | cut -d ' ' -f 1)"
+          printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
+
+  pr-builder-image:
+    name: Build Windows builder image (pull request)
+    if: github.event_name == 'pull_request'
+    needs: builder-key
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the native image platform
+        id: platform
+        shell: powershell
+        run: |
+          $architecture = switch ("${{ runner.arch }}") {
+            "X64" { "amd64" }
+            "ARM64" { "arm64" }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
+          }
+          "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Build the pull-request image locally
+        shell: powershell
+        run: |
+          ./scripts/build-windows-gui-builder-image.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage "${{ steps.platform.outputs.image }}"
+
+  main-builder-image:
+    name: Build and publish Windows builder image (main)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: builder-key
+    outputs:
+      image: ${{ steps.platform.outputs.image }}
+    permissions:
+      contents: read
+      packages: write
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Resolve the native image platform
+        id: platform
+        shell: powershell
+        run: |
+          $architecture = switch ("${{ runner.arch }}") {
+            "X64" { "amd64" }
+            "ARM64" { "arm64" }
+            default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
+          }
+          "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Check immutable architecture image
+        id: image
+        shell: powershell
+        run: |
+          $tag = "${{ steps.platform.outputs.image }}"
+          $savedPreference = $ErrorActionPreference
+          $ErrorActionPreference = "SilentlyContinue"
+          & docker manifest inspect $tag *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = $savedPreference
+          "build=$((-not $exists).ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($exists) {
+            Write-Host "Reusing immutable Windows builder image $tag"
+          }
+          exit 0
+      - name: Build and push changed Windows builder image
+        if: steps.image.outputs.build == 'true'
+        shell: powershell
+        run: |
+          $tag = "${{ steps.platform.outputs.image }}"
+          ./scripts/build-windows-gui-builder-image.ps1 `
+            -RepositoryRoot "${{ github.workspace }}" `
+            -BuilderImage $tag
+          & docker push $tag
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  builder-manifest:
+    name: Publish Windows builder manifest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: main-builder-image
+    permissions:
+      contents: read
+      packages: write
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Promote the published native image to latest
+        shell: bash
+        env:
+          ARCHITECTURE_IMAGE: ${{ needs.main-builder-image.outputs.image }}
+        run: |
+          docker manifest inspect "$ARCHITECTURE_IMAGE" >/dev/null
+          latest="$WINDOWS_BUILDER_REPOSITORY:latest"
+          docker manifest rm "$latest" >/dev/null 2>&1 || true
+          docker manifest create "$latest" "$ARCHITECTURE_IMAGE"
+          docker manifest push --purge "$latest"
+          docker manifest inspect "$latest" >/dev/null

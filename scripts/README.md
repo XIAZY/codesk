@@ -103,7 +103,7 @@ construction-only output. It does not exercise runtime behavior.
 ## Windows desktop build and deploy
 
 The public Windows GUI targets consume the reusable
-`alphatoad/notty:windows-builder` image and run the complete payload and MSI
+`ghcr.io/xiazy/notty-windows-builder:latest` image and run the complete payload and MSI
 toolchain in a process-isolated Windows container. The image pins Go 1.23.12,
 Rust 1.97.0, Zig 0.16.0, LLVM-MinGW 20260616, .NET SDK 8.0.423, Git for Windows
 2.55.0.3, and WiX SDK 4.0.5. Build products are written through the repository
@@ -128,12 +128,11 @@ docker info --format '{{.OSType}} {{.Architecture}} {{.OSVersion}}'
 # prints windows arm64 ... on Windows ARM64, or windows amd64 ... on AMD64
 ```
 
-The first `windows-gui-build` or `windows-gui-deploy` invocation constructs the
-reusable builder image automatically when it is absent. That image build
-downloads Windows Server Core plus versioned tool archives over
-HTTPS and restores WiX into the image's NuGet cache. Payload builds may
-also download the source tree's Go modules and Cargo crates. Later image builds
-reuse Docker's toolchain layers. Server Core is intentional:
+The image publication jobs construct the reusable builder when its exact
+Dockerfile/WiX content tag is absent. That image build downloads Windows Server
+Core plus versioned tool archives over HTTPS and restores WiX into the image's
+NuGet cache. Payload builds may also download the source tree's Go modules and
+Cargo crates. Later image builds reuse Docker's toolchain layers. Server Core is intentional:
 Nano Server is smaller, but it omits both Windows PowerShell and `msi.dll`; the
 WiX reproducibility and ICE validation path requires those operating-system
 components.
@@ -141,7 +140,20 @@ components.
 Later product builds reuse the image and reject one whose Windows architecture
 does not match the Docker engine. To use another local or pre-pulled tag, set
 `WINDOWS_GUI_BUILDER_IMAGE`; the image-build and product-build jobs must use the
-same value.
+same value. The dedicated Windows-builder workflow runs when the Dockerfile or
+copied WiX project changes. On pull requests it schedules any native Windows
+runner, derives the image architecture from `runner.arch`, and builds the image
+locally with read-only repository permissions. That job has no registry login,
+package-write permission, push, or manifest operation. After the same change is
+merged to `main`, separate main-only jobs build and push the immutable native
+content tag and promote it to `latest`.
+
+Windows-native validation remains a separate read-only workflow. Pull-request
+CI always pulls the existing `latest` registry manifest on any matching native
+Windows runner, pins the pulled image ID, and uses that image for MSI and
+Windows-platform acceptance. It never builds or publishes the builder image.
+A missing published image fails validation instead of mutating the registry from
+an unmerged revision.
 
 ```sh
 make windows-gui-build
@@ -158,14 +170,13 @@ arguments, so the lightweight image-builder supplies only
 `TARGETARCH=<Docker server architecture>` as a compatibility fallback. Image
 construction and product execution both explicitly use `--isolation=process`.
 The product build target does not accept `WINDOWS_GUI_ARCHES`; it builds exactly
-the native container architecture. On this machine that means an ARM64
-container and ARM64 payload.
+the native container architecture selected by the Windows runner.
 
-Rust is the narrow exception to native host tools on ARM64. Rust's native
-Windows ARM64 host uses the MSVC ABI and would require the much larger Visual
-Studio Build Tools plus Windows SDK. The image instead uses Rust's self-contained
-`x86_64-pc-windows-gnu` host under Windows ARM64 emulation and installs both
-Windows target libraries. Go cgo uses the native LLVM-MinGW clang driver for
+Rust 1.97 supplies LLVM-MinGW host tools for both Windows architectures, so the
+image selects `x86_64-pc-windows-gnullvm` or
+`aarch64-pc-windows-gnullvm` from `TARGETARCH`; Rust host compilation never
+falls back to emulation. Both Windows target libraries remain installed for
+the shared release scripts. Go cgo uses the native LLVM-MinGW clang driver for
 the selected output architecture. Zig remains available for the shared inner
 script and non-container CI path, but the container supplies
 `WINDOWS_GUI_CC_AMD64` and `WINDOWS_GUI_CC_ARM64` overrides because Zig 0.16.0's
@@ -249,13 +260,14 @@ uploaded. Deployed bundles live under `desktop/windows/<DAEMON_VERSION>/<arch>`;
 short-cache `desktop/windows/latest/manifest.json` pointer is written only
 after both architecture bundles are present.
 
-The Windows MSI CI surface was removed on 2026-07-31: its job had been disabled for want of a
-Windows ARM64 runner while its artifact uploads still ran on every build, filling the repository's
-artifact quota and failing unrelated CI rows. `scripts/verify-windows-gui-ci.sh` went with it — it
-downloaded `windows-desktop-msi-<arch>`, which no workflow produces any more, so it could only fail
-confusingly. Rebuilding MSI CI (task #21) means rebuilding its artifact handoff and its verifier
-together. The builder scripts and their contracts are unchanged and still cover local and native
-construction.
+The Windows-native CI job builds both payload architectures and ICE-validates
+both reproducible MSIs inside the reusable Windows builder image without an
+Actions artifact handoff. It then installs the MSI matching the native runner,
+checks registration, installed payload hashes, shortcut wiring, component
+registry state, and the installed agent-tool version, and uninstalls it with
+cleanup assertions. The same image produces the native syncer test executable;
+the host executes that binary so Windows file, process, and lock semantics are
+tested without reinstalling Go, Rust, Zig, LLVM-MinGW, .NET, or WiX on every run.
 
 ### Native acceptance
 
