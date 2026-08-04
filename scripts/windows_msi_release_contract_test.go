@@ -476,6 +476,49 @@ func checkBuildDeployContractCIGate(workflow string) error {
 	return nil
 }
 
+func TestSourceContract_BoundaryIsCIGated(t *testing.T) {
+	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := normalizeSourceNewlines(string(workflowData))
+	if err := checkSourceContractCIGate(workflow); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []struct {
+		name, old, replacement string
+	}{
+		{"focused execution removed", `go test -run '^TestSourceContract_' -count=1 -v ./daemon/internal/syncer`, `go test ./daemon/internal/syncer`},
+		{"explicit PASS count weakened", `if [ "$passes" -ne 11 ]; then`, `if [ "$passes" -lt 1 ]; then`},
+		{"skip rejection removed", `if echo "$out" | grep -q -- '^--- SKIP: TestSourceContract_'; then`, `if false; then`},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			if strings.Count(workflow, mutation.old) != 1 {
+				t.Fatalf("mutation source %q is not unique", mutation.old)
+			}
+			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
+			if err := checkSourceContractCIGate(mutated); err == nil {
+				t.Fatal("source-contract CI mutation passed")
+			}
+		})
+	}
+}
+
+func checkSourceContractCIGate(workflow string) error {
+	for required, count := range map[string]int{
+		"- name: Guard — source-contract tests actually ran with package source":                 1,
+		`go test -run '^TestSourceContract_' -count=1 -v ./daemon/internal/syncer`:               1,
+		`passes="$(printf '%s\n' "$out" | grep -c -- '^--- PASS: TestSourceContract_' || true)"`: 1,
+		`if [ "$passes" -ne 11 ]; then`:                                      1,
+		`if echo "$out" | grep -q -- '^--- SKIP: TestSourceContract_'; then`: 1,
+	} {
+		if got := strings.Count(workflow, required); got != count {
+			return fmt.Errorf("source-contract CI gate count for %q = %d, want %d", required, got, count)
+		}
+	}
+	return nil
+}
+
 func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 	workflowData, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "windows-native.yml"))
 	if err != nil {
@@ -501,6 +544,8 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		{"native Go test flags not passed as literal arguments", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary -test.count=1 -test.v 2>&1`},
 		{"native stderr treated as terminating", "workflow", `$ErrorActionPreference = "Continue"`, `$ErrorActionPreference = "Stop"`},
 		{"native suite is filtered", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary '-test.count=1' '-test.v' '-test.run=TestWorkspaceFS' 2>&1`},
+		{"source-contract inventory is not listed", "workflow", `$sourceContracts = & $testBinary '-test.list=^TestSourceContract_' 2>&1`, `$sourceContracts = @()`},
+		{"source-contract native leak is accepted", "workflow", `if ($sourceContracts -match '^TestSourceContract_') {`, `if ($false) {`},
 		{"release install removed", "lifecycle", `Invoke-Msi -Operation install -Package $release.release.MsiPath`, `Write-Host "release install skipped"`},
 		{"release uninstall removed", "lifecycle", `Invoke-Msi -Operation uninstall -Package $release.release.MsiPath`, `Write-Host "release uninstall skipped"`},
 		{"installed payload hash not checked", "lifecycle", `installed Codesk.exe does not match the validated payload`, `installed Codesk.exe was not checked`},
@@ -561,6 +606,10 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 		`dist\windows-gui\msi\$architecture`:                                            1,
 		`dist\windows-gui\payload\$architecture`:                                        1,
 		`$required = @(`:                                                                1,
+		`$sourceContracts = & $testBinary '-test.list=^TestSourceContract_' 2>&1`:       1,
+		`$sourceContractListExit = $LASTEXITCODE`:                                       1,
+		`if ($sourceContracts -match '^TestSourceContract_') {`:                         1,
+		`Source-contract tests leaked into the source-less Windows binary`:              1,
 		`$savedErrorActionPreference = $ErrorActionPreference`:                          1,
 		`$ErrorActionPreference = "Continue"`:                                           1,
 		`$output = & $testBinary '-test.count=1' '-test.v' 2>&1`:                        1,
@@ -571,13 +620,15 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 			return fmt.Errorf("Windows MSI CI source count for %q = %d, want %d", required, got, count)
 		}
 	}
+	sourceListAt := strings.Index(job, `$sourceContracts = & $testBinary '-test.list=^TestSourceContract_' 2>&1`)
+	sourceRejectAt := strings.Index(job, `if ($sourceContracts -match '^TestSourceContract_') {`)
 	requiredAt := strings.Index(job, `$required = @(`)
 	continueAt := strings.Index(job, `$ErrorActionPreference = "Continue"`)
 	invokeAt := strings.Index(job, `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`)
 	exitAt := strings.Index(job, `$testExit = $LASTEXITCODE`)
 	restoreAt := strings.Index(job, `$ErrorActionPreference = $savedErrorActionPreference`)
 	verifyAt := strings.Index(job, `foreach ($test in $required)`)
-	if !(requiredAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
+	if !(sourceListAt < sourceRejectAt && sourceRejectAt < requiredAt && requiredAt < continueAt && continueAt < invokeAt && invokeAt < exitAt && exitAt < restoreAt && restoreAt < verifyAt) {
 		return fmt.Errorf("Windows MSI CI does not run the full native suite before required PASS verification")
 	}
 	for _, forbidden := range []string{

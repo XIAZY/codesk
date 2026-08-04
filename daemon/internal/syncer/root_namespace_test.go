@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	crdt "notty/internal/ycrdt"
@@ -414,28 +413,6 @@ func TestRootProjectionPlannerPreservesPreviousConflictOwnerAfterClaimResolution
 	}
 	if got := byDoc["doc_remote"].MaterializedPath; got != "docs/local (doc_remote).md" {
 		t.Fatalf("remote materialized path = %q, want docs/local (doc_remote).md", got)
-	}
-}
-
-func TestRootProjectionPlannerStaysPureStructural(t *testing.T) {
-	sourceBytes, err := os.ReadFile("root_namespace.go")
-	if err != nil {
-		t.Fatalf("read root_namespace.go: %v", err)
-	}
-	source := string(sourceBytes)
-	start := strings.Index(source, "func (RootProjectionPlanner) Plan")
-	end := strings.Index(source, "func buildRootProjectionPlan")
-	if start < 0 || end < 0 || end <= start {
-		t.Fatalf("could not locate planner body")
-	}
-	planner := source[start:end]
-	for _, forbidden := range []string{"WorkspaceFS", ".Exec(", ".Query(", ".QueryRow(", "os.", "http."} {
-		if strings.Contains(planner, forbidden) {
-			t.Fatalf("root projection planner must stay pure; found %q in:\n%s", forbidden, planner)
-		}
-	}
-	if strings.Contains(source, "RootTree") || strings.Contains(source, "DecodeRootTree") {
-		t.Fatalf("obsolete RootTree naming should not be reintroduced")
 	}
 }
 

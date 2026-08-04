@@ -115,6 +115,17 @@ jobs:
           exit 1
       - name: Backend + full Go suite on live Postgres
         run: go test -timeout 20m ./...
+      - name: Guard — source-contract tests actually ran with package source
+        run: |
+          out="$(go test -run '^TestSourceContract_' -count=1 -v ./daemon/internal/syncer)"
+          echo "$out"
+          passes="$(printf '%s\n' "$out" | grep -c -- '^--- PASS: TestSourceContract_' || true)"
+          if [ "$passes" -ne 11 ]; then
+            echo "::error::source-contract PASS count = $passes, want 11 — a package-source fitness function may be missing or unenforced"; exit 1
+          fi
+          if echo "$out" | grep -q -- '^--- SKIP: TestSourceContract_'; then
+            echo "::error::source-contract test SKIPPED — source-present CI must execute every architectural fitness function"; exit 1
+          fi
       - name: Guard — live-Postgres tests actually ran (no silent skip = false green)
         run: |
           out="$(go test -run TestActivitiesSurviveStoreRestartPostgres -count=1 -v ./backend/internal/notty)"

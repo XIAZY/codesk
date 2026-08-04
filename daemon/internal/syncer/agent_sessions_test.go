@@ -2072,30 +2072,6 @@ func TestAgentSessionInjectedTerminalReasonRoutesToFailed(t *testing.T) {
 	}
 }
 
-func TestAgentSessionSupervisorDoesNotUseCodexWireMethods(t *testing.T) {
-	body, err := os.ReadFile("agent_sessions.go")
-	if err != nil {
-		t.Fatalf("read agent_sessions.go: %v", err)
-	}
-	text := string(body)
-	for _, forbidden := range []string{
-		"CodexThreadID",
-		"codexThreadId",
-		"thread/start",
-		"thread/resume",
-		"turn/start",
-		"turn/steer",
-		"turn/interrupt",
-		"turn/started",
-		"codexAppServer",
-		"appServerEvent",
-	} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("agent session supervisor should not contain Codex wire term %q", forbidden)
-		}
-	}
-}
-
 func TestCodexAppServerThreadParamsUseSharedInstructionsAndSlimResume(t *testing.T) {
 	client := &codexAppServer{profile: RuntimeProfile{
 		Model:           " gpt-5.6-sol ",

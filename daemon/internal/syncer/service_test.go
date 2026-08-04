@@ -4537,18 +4537,6 @@ func TestParseAgentInboxChangedEventTargetsOneAgent(t *testing.T) {
 	}
 }
 
-func TestServiceSourceHasNoBroadAgentWakeFallback(t *testing.T) {
-	source, err := os.ReadFile("service.go")
-	if err != nil {
-		t.Fatalf("read service source: %v", err)
-	}
-	for _, forbidden := range []string{"wake" + "AllAgentWorkers", "should" + "WakeAgentWorkersForEvent"} {
-		if strings.Contains(string(source), forbidden) {
-			t.Fatalf("service.go still contains broad agent wake fallback %q", forbidden)
-		}
-	}
-}
-
 func newDocWithText(t *testing.T, content string) *crdt.Doc {
 	t.Helper()
 	doc := crdt.New()
@@ -5279,43 +5267,6 @@ func TestAdmissionEpochFenceSkipsStaleREST(t *testing.T) {
 		service.mu.Unlock()
 		return ws != nil && ws.RootDocumentID == "snap2"
 	})
-}
-
-func TestPublishSnapshotStoresBeforeEpochIncrement(t *testing.T) {
-	// Reversal admits an uncanceled REST ahead of a pending snapshot:
-	// coordinator captures the new epoch, swaps nil, passes the admission
-	// fence, and starts REST while the snapshot is still being stored.
-	src, err := os.ReadFile("service.go")
-	if err != nil {
-		t.Fatalf("read service.go: %v", err)
-	}
-	fnSig := []byte("func (s *Service) publishSnapshot(")
-	fnStart := bytes.Index(src, fnSig)
-	if fnStart < 0 {
-		t.Fatal("publishSnapshot not found in service.go")
-	}
-	body := src[fnStart:]
-	braceStart := bytes.IndexByte(body, '{')
-	depth := 1
-	pos := braceStart + 1
-	for pos < len(body) && depth > 0 {
-		switch body[pos] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-		}
-		pos++
-	}
-	fnBody := body[:pos]
-	storeIdx := bytes.Index(fnBody, []byte("pendingSnapshot.Store"))
-	addIdx := bytes.Index(fnBody, []byte("snapshotEpoch.Add"))
-	if storeIdx < 0 || addIdx < 0 {
-		t.Fatal("pendingSnapshot.Store and snapshotEpoch.Add not found in publishSnapshot")
-	}
-	if addIdx < storeIdx {
-		t.Fatal("snapshotEpoch.Add must appear after pendingSnapshot.Store in publishSnapshot")
-	}
 }
 
 func TestPostSnapshotRefreshIntentPreserved(t *testing.T) {
