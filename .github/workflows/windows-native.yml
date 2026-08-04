@@ -85,6 +85,7 @@ jobs:
             throw "Source-contract tests leaked into the source-less Windows binary: $($sourceContracts -join ', ')"
           }
           $required = @(
+            "TestWorkspaceReplicaRealWatcherDeliversCreateWriteRenameDelete",
             "TestWorkspaceFSAppendUsesCanonicalPathLease",
             "TestWorkspaceFSCreateEmptyOrReadCreatesAbsentFile",
             "TestWorkspaceFSCreateEmptyOrReadPreservesExistingFile",
