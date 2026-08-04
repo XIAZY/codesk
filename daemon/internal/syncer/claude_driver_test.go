@@ -270,7 +270,7 @@ func TestClaudeResumeSessionRequiresSessionID(t *testing.T) {
 // synchronously and stay usable for the respawn.
 func TestClaudeResumeUnknownSessionFailsFastThenStartsFresh(t *testing.T) {
 	t.Setenv("FAKE_CLAUDE_FAIL_RESUME", "1")
-	process := newTestClaudeProcess(t, writeFakeClaude(t))
+	process := newTestClaudeProcessWithHandshake(t, writeFakeClaude(t), claudeTestSpawnExitHandshakeWait)
 
 	_, err := process.WriteStdin(context.Background(), RuntimeInput{
 		Kind:      RuntimeInputResumeSession,
