@@ -546,6 +546,7 @@ func TestWindowsMSICIRunsNativeValidationAndLifecycle(t *testing.T) {
 		{"native suite is filtered", "workflow", `$output = & $testBinary '-test.count=1' '-test.v' 2>&1`, `$output = & $testBinary '-test.count=1' '-test.v' '-test.run=TestWorkspaceFS' 2>&1`},
 		{"source-contract inventory is not listed", "workflow", `$sourceContracts = & $testBinary '-test.list=^TestSourceContract_' 2>&1`, `$sourceContracts = @()`},
 		{"source-contract native leak is accepted", "workflow", `if ($sourceContracts -match '^TestSourceContract_') {`, `if ($false) {`},
+		{"real filesystem watcher gate removed", "workflow", `"TestWorkspaceReplicaRealWatcherDeliversCreateWriteRenameDelete",`, `"TestWorkspaceReplicaRealWatcherDeliveryWasSkipped",`},
 		{"release install removed", "lifecycle", `Invoke-Msi -Operation install -Package $release.release.MsiPath`, `Write-Host "release install skipped"`},
 		{"release uninstall removed", "lifecycle", `Invoke-Msi -Operation uninstall -Package $release.release.MsiPath`, `Write-Host "release uninstall skipped"`},
 		{"installed payload hash not checked", "lifecycle", `installed Codesk.exe does not match the validated payload`, `installed Codesk.exe was not checked`},
@@ -615,6 +616,7 @@ func checkWindowsMSICILifecycle(workflow, lifecycle string) error {
 		`$output = & $testBinary '-test.count=1' '-test.v' 2>&1`:                        1,
 		`$testExit = $LASTEXITCODE`:                                                     1,
 		`$ErrorActionPreference = $savedErrorActionPreference`:                          1,
+		`"TestWorkspaceReplicaRealWatcherDeliversCreateWriteRenameDelete"`:              1,
 	} {
 		if got := strings.Count(job, required); got != count {
 			return fmt.Errorf("Windows MSI CI source count for %q = %d, want %d", required, got, count)
