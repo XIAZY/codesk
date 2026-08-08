@@ -17,6 +17,14 @@ cat > "$TMP_DIR/bin/docker" <<'FAKEDOCKER'
 case "$*" in
   *"up -d"*) exit 0 ;;
   *"port backend"*) echo "0.0.0.0:5432"; exit 0 ;;
+  *"ps -a"*)
+    echo "backend Exited (1)"
+    [ "${FAKE_DIAGNOSTICS_FAIL:-0}" = "1" ] && exit 1
+    exit 0 ;;
+  *"logs --no-color --tail=500"*)
+    echo "backend | fatal startup"
+    [ "${FAKE_DIAGNOSTICS_FAIL:-0}" = "1" ] && exit 1
+    exit 0 ;;
   *down*)
     echo "$*" >> "$FAKE_DOWN_LOG"
     if [ "${FAKE_DOWN_FAIL:-0}" = "1" ]; then
@@ -60,10 +68,19 @@ grep -q "network has active endpoints" <<< "$CASE_OUT" || fail "docker's own err
 # A real suite failure must not be masked or renumbered by teardown handling.
 run_case FAKE_SUITE_FAIL=1 FAKE_DOWN_FAIL=0
 [ "$CASE_RC" -eq 3 ] || fail "suite failure must propagate unchanged, got $CASE_RC"
+grep -q "FAILURE DIAGNOSTICS" <<< "$CASE_OUT" || fail "suite failure must emit diagnostics"
+grep -q "backend Exited (1)" <<< "$CASE_OUT" || fail "suite failure must emit compose status"
+grep -q "backend | fatal startup" <<< "$CASE_OUT" || fail "suite failure must emit compose logs"
 
 run_case FAKE_SUITE_FAIL=1 FAKE_DOWN_FAIL=1
 [ "$CASE_RC" -eq 3 ] || fail "suite failure must survive a failed teardown, got $CASE_RC"
 grep -q "TEARDOWN FAILED" <<< "$CASE_OUT" || fail "teardown failure must still be reported"
+
+# Diagnostic collection is evidence only: it must never mask or renumber the primary failure.
+run_case FAKE_SUITE_FAIL=1 FAKE_DIAGNOSTICS_FAIL=1
+[ "$CASE_RC" -eq 3 ] || fail "diagnostic failure must preserve suite exit 3, got $CASE_RC"
+grep -q "docker compose ps failed" <<< "$CASE_OUT" || fail "failed status collection must be explicit"
+grep -q "docker compose logs failed" <<< "$CASE_OUT" || fail "failed log collection must be explicit"
 
 # KEEP is a deliberate long-lived stack: named for it, announced, and never torn down.
 run_case NOTTY_E2E_KEEP=1 FAKE_DOWN_FAIL=1

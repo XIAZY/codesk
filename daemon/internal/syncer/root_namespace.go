@@ -37,7 +37,19 @@ type rootProjectionEntry struct {
 	DesiredPath       string
 	MaterializedPath  string
 	Active            bool
+	LocalDeleteIntent bool
 	ProjectedSeq      int64
+}
+
+type rootProjectionClearProof struct {
+	RootDocumentID       string
+	ContentDocumentID    string
+	EntryID              string
+	DesiredPath          string
+	MaterializedPath     string
+	TombstoneOperationID string
+	RestoreOperationID   string
+	WindowGeneration     int64
 }
 
 type rootIntent struct {
@@ -215,12 +227,31 @@ func (s *workspaceRuntime) tombstoneRootFileEntry(ctx context.Context, contentDo
 	if contentDocumentID == "" {
 		return nil
 	}
-	return s.mutateRootDoc(ctx, actorID, actorType, func(doc *crdt.Doc) ([]byte, error) {
+	if s.supportsWorkspaceCapability(documentTombstoneReverseWindowV1) {
+		started, err := s.beginSemanticRootLocalDelete(contentDocumentID)
+		if err != nil {
+			return err
+		}
+		if started {
+			return nil
+		}
+	}
+	return s.mutateRootDocWithLocalDeleteIntent(ctx, actorID, actorType, contentDocumentID, func(doc *crdt.Doc) ([]byte, error) {
 		return TombstoneRootFile(doc, contentDocumentID, rootMutationActor{ID: actorID, Kind: actorType})
 	})
 }
 
 func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType string, mutate func(*crdt.Doc) ([]byte, error)) error {
+	return s.mutateRootDocWithLocalDeleteIntent(ctx, actorID, actorType, "", mutate)
+}
+
+func (s *workspaceRuntime) mutateRootDocWithLocalDeleteIntent(
+	ctx context.Context,
+	actorID string,
+	actorType string,
+	localDeleteContentDocumentID string,
+	mutate func(*crdt.Doc) ([]byte, error),
+) error {
 	if s == nil || s.docCache == nil || strings.TrimSpace(s.rootDocumentID) == "" || mutate == nil {
 		return nil
 	}
@@ -261,7 +292,13 @@ func (s *workspaceRuntime) mutateRootDoc(ctx context.Context, actorID, actorType
 		ActorType:  firstNonEmptyText(actorType, s.actorKind()),
 		CreatedAt:  time.Now().UTC(),
 	}
-	if err := cache.storeOutboxUpdateLocked(entry, s.rootDocumentID, rootDocumentPath, record); err != nil {
+	if err := cache.storeOutboxUpdateWithRootLocalDeleteIntentLocked(
+		entry,
+		s.rootDocumentID,
+		rootDocumentPath,
+		record,
+		localDeleteContentDocumentID,
+	); err != nil {
 		unlock()
 		return err
 	}
@@ -324,10 +361,21 @@ func (s *workspaceRuntime) reconcileRootNamespace(ctx context.Context) error {
 		LocalClaims:  claims,
 		ProjectedSeq: projectedSeq,
 	})
+	deferred, err := s.prepareRootReverseProjection(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if deferred {
+		return nil
+	}
 	if err := s.applyRootProjection(ctx, plan); err != nil {
 		return err
 	}
-	if err := cache.storeRootProjectionEntries(s.rootDocumentID, plan.Next); err != nil {
+	proofs, err := s.rootReverseProjectionClearProofs(plan.Next)
+	if err != nil {
+		return err
+	}
+	if err := cache.storeRootProjectionEntriesWithReverseProofs(s.rootDocumentID, plan.Next, proofs); err != nil {
 		return err
 	}
 	if err := s.setDesiredDocumentsFromRootProjection(plan.Next); err != nil {
@@ -359,8 +407,10 @@ func (s *workspaceRuntime) setDesiredDocumentsFromRootProjection(entries []rootP
 		return nil
 	}
 	desired := []*document(nil)
+	desiredByID := map[string]struct{}{}
 	if s.rootDocumentID != "" {
 		desired = append(desired, &document{ID: s.rootDocumentID, Path: rootDocumentPath})
+		desiredByID[s.rootDocumentID] = struct{}{}
 	}
 	for _, entry := range entries {
 		if !entry.Active || strings.TrimSpace(entry.ContentDocumentID) == "" || strings.TrimSpace(entry.MaterializedPath) == "" {
@@ -370,6 +420,23 @@ func (s *workspaceRuntime) setDesiredDocumentsFromRootProjection(entries []rootP
 			ID:   entry.ContentDocumentID,
 			Path: entry.MaterializedPath,
 		})
+		desiredByID[entry.ContentDocumentID] = struct{}{}
+	}
+	if s.docCache != nil && s.rootDocumentID != "" {
+		intents, err := s.docCache.loadRootLocalDeleteIntents(s.rootDocumentID)
+		if err != nil {
+			return err
+		}
+		for _, intent := range intents {
+			if intent.Phase == rootLocalDeletePhaseLegacyFloor || strings.TrimSpace(intent.MaterializedPath) == "" {
+				continue
+			}
+			if _, exists := desiredByID[intent.ContentDocumentID]; exists {
+				continue
+			}
+			desired = append(desired, &document{ID: intent.ContentDocumentID, Path: intent.MaterializedPath})
+			desiredByID[intent.ContentDocumentID] = struct{}{}
+		}
 	}
 	sort.Slice(desired, func(i, j int) bool {
 		if desired[i].ID != desired[j].ID {
@@ -532,6 +599,51 @@ func (s *workspaceRuntime) projectRootRemovedEntry(projected rootProjectionEntry
 	s.replica.mu.Lock()
 	tracked := s.replica.projectedByID[projected.ContentDocumentID]
 	s.replica.mu.Unlock()
+	if projected.LocalDeleteIntent {
+		if s.docCache != nil && s.rootDocumentID != "" {
+			intent, ok, err := s.docCache.loadRootLocalDeleteIntent(s.rootDocumentID, projected.ContentDocumentID)
+			if err != nil {
+				return err
+			}
+			if ok && intent.Phase != rootLocalDeletePhaseLegacyFloor {
+				if tracked != nil {
+					tracked.clearLocalDeleted()
+					tracked.clearRemoteDeleted()
+					if occupant, classifyErr := classifyWorkspacePathOccupant(tracked.Path); classifyErr != nil {
+						return classifyErr
+					} else if occupant.Kind == workspacePathRegularFile {
+						tracked.markLocalDirty()
+					} else {
+						tracked.clearLocalDirty()
+					}
+				}
+				s.markDocumentDirty(rootLocalDeleteReconcileWake)
+				return nil
+			}
+		}
+		materializedPath, err := normalizeVisibleRootPath(projected.MaterializedPath)
+		if err != nil {
+			return err
+		}
+		fs, err := requireWorkspaceFS(s.replica.fs, s.replica.rootDir)
+		if err != nil {
+			return err
+		}
+		absolutePath := filepath.Join(s.replica.rootDir, filepath.FromSlash(materializedPath))
+		recoveryPaths := []string{absolutePath}
+		if tracked != nil && filepath.Clean(tracked.Path) != filepath.Clean(absolutePath) {
+			recoveryPaths = append(recoveryPaths, tracked.Path)
+		}
+		for _, recoveryPath := range recoveryPaths {
+			if _, err := fs.archiveRegularFile(recoveryPath, safeDocumentCacheName(projected.ContentDocumentID)); err != nil {
+				return err
+			}
+		}
+		if tracked != nil {
+			tracked.untrack()
+		}
+		return nil
+	}
 	if tracked == nil {
 		return nil
 	}

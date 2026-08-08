@@ -18,25 +18,31 @@ import (
 const workspaceReconcileMinInterval = 2 * time.Second
 const localCreateReconcileWake = "__local_create__"
 const localPathChangeReconcileWake = "__local_path_change__"
+const rootLocalDeleteReconcileWake = "__root_local_delete__"
 const rootDocumentPath = ".notty/root"
+const documentTombstoneReverseWindowV1 = "documentTombstoneReverseWindowV1"
 
 type workspaceRuntime struct {
-	cfg                Config
-	client             *http.Client
-	mu                 sync.Mutex
-	replica            *workspaceReplica
-	docCache           *documentCache
-	pathLocks          pathLockLeaseStore
-	closeDocumentCache func() error
-	reconcileQueue     *reconcileQueue
-	localCreates       *localCreateQueue
-	documentSocket     *workspaceDocumentSocket
-	threadDeliveryWake chan struct{}
-	initialWorkspace   *workspaceResponse
-	rootDocumentID     string
-	sendDocumentUpdate func(context.Context, string, outboxUpdateRecord) error
-	closeOnce          sync.Once
-	closeErr           error
+	cfg                       Config
+	client                    *http.Client
+	mu                        sync.Mutex
+	replica                   *workspaceReplica
+	docCache                  *documentCache
+	pathLocks                 pathLockLeaseStore
+	closeDocumentCache        func() error
+	reconcileQueue            *reconcileQueue
+	localCreates              *localCreateQueue
+	documentSocket            *workspaceDocumentSocket
+	threadDeliveryWake        chan struct{}
+	initialWorkspace          *workspaceResponse
+	rootDocumentID            string
+	capabilities              map[string]struct{}
+	nextReverseWindowWake     time.Time
+	sendDocumentUpdate        func(context.Context, string, outboxUpdateRecord) error
+	waitForBackendStateVector func(context.Context, string, []byte) error
+	reverseWindowDecisionHook func()
+	closeOnce                 sync.Once
+	closeErr                  error
 }
 
 func (r *workspaceRuntime) fetchWorkspace(ctx context.Context) (*workspaceResponse, error) {
@@ -265,6 +271,18 @@ func (r *workspaceRuntime) enqueueStartupStoreWork() error {
 	if wakeDelivery {
 		r.wakeThreadDelivery()
 	}
+	if strings.TrimSpace(r.rootDocumentID) != "" {
+		intents, err := r.docCache.loadRootLocalDeleteIntents(r.rootDocumentID)
+		if err != nil {
+			return err
+		}
+		for _, intent := range intents {
+			if intent.Phase != rootLocalDeletePhaseLegacyFloor {
+				r.markDocumentDirty(rootLocalDeleteReconcileWake)
+				break
+			}
+		}
+	}
 	return nil
 }
 
@@ -338,6 +356,7 @@ func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *worksp
 	}
 	if workspace != nil {
 		r.rootDocumentID = strings.TrimSpace(workspace.RootDocumentID)
+		r.replaceWorkspaceCapabilities(workspace.Capabilities)
 	}
 	if err := r.updateDesiredDocumentsFromRootProjection(); err != nil {
 		return err
@@ -346,6 +365,49 @@ func (r *workspaceRuntime) applyWorkspace(ctx context.Context, workspace *worksp
 		r.markDocumentDirty(r.rootDocumentID)
 	}
 	return nil
+}
+
+func (r *workspaceRuntime) replaceWorkspaceCapabilities(capabilities []string) {
+	if r == nil {
+		return
+	}
+	next := make(map[string]struct{}, len(capabilities))
+	for _, capability := range capabilities {
+		if capability != "" {
+			next[capability] = struct{}{}
+		}
+	}
+	r.mu.Lock()
+	r.capabilities = next
+	r.mu.Unlock()
+}
+
+func (r *workspaceRuntime) supportsWorkspaceCapability(capability string) bool {
+	if r == nil || capability == "" {
+		return false
+	}
+	r.mu.Lock()
+	_, ok := r.capabilities[capability]
+	r.mu.Unlock()
+	return ok
+}
+
+func (r *workspaceRuntime) setNextReverseWindowWake(next time.Time) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.nextReverseWindowWake = next
+	r.mu.Unlock()
+}
+
+func (r *workspaceRuntime) reverseWindowWake() time.Time {
+	if r == nil {
+		return time.Time{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nextReverseWindowWake
 }
 
 func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
@@ -387,11 +449,20 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 	}
 
 	runOrDelay := func() {
-		if r == nil || r.reconcileQueue == nil || r.reconcileQueue.Len() == 0 {
-			stopTimer()
+		if r == nil || r.reconcileQueue == nil {
 			return
 		}
 		now := time.Now()
+		nextReverseWake := r.reverseWindowWake()
+		reverseWakeDue := !nextReverseWake.IsZero() && !now.Before(nextReverseWake)
+		if r.reconcileQueue.Len() == 0 && !reverseWakeDue {
+			if nextReverseWake.IsZero() {
+				stopTimer()
+			} else {
+				arm(nextReverseWake.Sub(now))
+			}
+			return
+		}
 		nextAllowed := lastRun.Add(workspaceReconcileMinInterval)
 		if !lastRun.IsZero() && now.Before(nextAllowed) {
 			arm(nextAllowed.Sub(now))
@@ -422,6 +493,10 @@ func (r *workspaceRuntime) reconcileLoop(ctx context.Context) {
 		}
 		if r.reconcileQueue.Len() > 0 {
 			arm(workspaceReconcileMinInterval)
+		} else if nextReverseWake := r.reverseWindowWake(); !nextReverseWake.IsZero() {
+			arm(nextReverseWake.Sub(time.Now()))
+		} else {
+			stopTimer()
 		}
 	}
 

@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -123,6 +124,20 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	if err := cache.storeLocalNamespaceIntent(newLocalCreateIntent("local-create.md", "daemon_agent", "daemon", "local-create-hash", time.Now().UnixNano())); err != nil {
 		t.Fatalf("store local namespace intent: %v", err)
 	}
+	if err := cache.storeRootLocalDeleteIntent(rootLocalDeleteIntent{
+		RootDocumentID:           "root-reverse-startup",
+		ContentDocumentID:        "doc-reverse-startup",
+		EntryID:                  "entry-reverse-startup",
+		DesiredPath:              "reverse.md",
+		MaterializedPath:         "reverse.md",
+		TombstoneOperationID:     uuid.NewString(),
+		ExpectedWindowGeneration: 0,
+		Phase:                    rootLocalDeletePhaseTombstonePending,
+		CreatedAt:                time.Now().UTC(),
+		UpdatedAt:                time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("store reverse-window startup intent: %v", err)
+	}
 	if err := cache.Close(); err != nil {
 		t.Fatalf("close cache: %v", err)
 	}
@@ -136,6 +151,7 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 		docCache:           reopened,
 		reconcileQueue:     queue,
 		threadDeliveryWake: make(chan struct{}, 1),
+		rootDocumentID:     "root-reverse-startup",
 	}
 	if err := runtime.enqueueStartupStoreWork(); err != nil {
 		t.Fatalf("enqueue startup store work: %v", err)
@@ -149,6 +165,9 @@ func TestWorkspaceRuntimeStartupRecoveryQueuesDurableSQLiteWork(t *testing.T) {
 	}
 	if !containsString(dirty, localCreateReconcileWake) {
 		t.Fatalf("expected startup recovery to queue pending local create work, got %#v", dirty)
+	}
+	if !containsString(dirty, rootLocalDeleteReconcileWake) {
+		t.Fatalf("expected startup recovery to queue reverse-window work, got %#v", dirty)
 	}
 	if containsString(dirty, "doc_thread_ready") {
 		t.Fatalf("ready thread delivery must not dirty the document, got %#v", dirty)
@@ -310,6 +329,620 @@ func TestWorkspaceRuntimeCreateEditDeleteMultipleFilesRegression(t *testing.T) {
 		t.Fatalf("reconcile deletes: %v", err)
 	}
 	server.assertRootDeleted(t, "docs/a.md", "docs/b.md", "notes/c.md")
+}
+
+type deleteCandidateRuntimeFixture struct {
+	ctx      context.Context
+	cfg      Config
+	root     string
+	relative string
+	path     string
+	runtime  *workspaceRuntime
+	server   *workspaceRuntimeRegressionServer
+	tracked  *trackedFile
+}
+
+func newDeleteCandidateRuntimeFixture(t *testing.T) *deleteCandidateRuntimeFixture {
+	t.Helper()
+	root := t.TempDir()
+	cfg := Config{
+		WorkspaceDir:       root,
+		AgentWorkspaceRoot: filepath.Join(t.TempDir(), "agents"),
+		AgentID:            "daemon_agent",
+	}
+	server := newWorkspaceRuntimeRegressionServer(t)
+	t.Cleanup(server.Close)
+	cfg.BackendURL = server.URL
+	runtime, err := newTestWorkspaceRuntime(t, cfg, server.Client(), root, cfg.AgentID, "daemon")
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	server.installDocumentUpdateHook(t, runtime)
+
+	relative := "docs/replaced.md"
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tracked path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write tracked path: %v", err)
+	}
+	runtime.localCreates.Mark(localCreateCandidate{
+		Root:      root,
+		Path:      path,
+		ActorID:   cfg.AgentID,
+		ActorType: "daemon",
+	})
+	ctx := context.Background()
+	if err := runtime.processLocalCreates(ctx); err != nil {
+		t.Fatalf("process tracked create: %v", err)
+	}
+	if err := runtime.reconcileDirtyDocuments(ctx); err != nil {
+		t.Fatalf("reconcile tracked create: %v", err)
+	}
+
+	runtime.replica.mu.Lock()
+	tracked := runtime.replica.projectedByPath[path]
+	runtime.replica.mu.Unlock()
+	if tracked == nil {
+		t.Fatal("created file was not tracked")
+	}
+	return &deleteCandidateRuntimeFixture{
+		ctx:      ctx,
+		cfg:      cfg,
+		root:     root,
+		relative: relative,
+		path:     path,
+		runtime:  runtime,
+		server:   server,
+		tracked:  tracked,
+	}
+}
+
+func (f *deleteCandidateRuntimeFixture) confirmDeleteCandidate(t *testing.T) {
+	t.Helper()
+	if err := os.Remove(f.path); err != nil {
+		t.Fatalf("remove tracked path: %v", err)
+	}
+	now := time.Now()
+	if err := f.runtime.replica.handleWatcherEvent(
+		fsnotify.Event{Name: f.path, Op: fsnotify.Remove},
+		now,
+	); err != nil {
+		t.Fatalf("handle tracked remove: %v", err)
+	}
+	if pending, err := f.runtime.replica.drainPathChanges(
+		f.ctx,
+		now.Add(workspaceMissingPathDelay+time.Millisecond),
+	); err != nil {
+		t.Fatalf("confirm delete candidate: %v", err)
+	} else if pending {
+		t.Fatal("confirmed delete candidate remained pending")
+	}
+	if !f.tracked.isLocalDeleted() {
+		t.Fatal("missing path did not become a reversible delete candidate")
+	}
+}
+
+func (f *deleteCandidateRuntimeFixture) restart(t *testing.T) *workspaceRuntime {
+	t.Helper()
+	if err := f.runtime.Close(); err != nil {
+		t.Fatalf("close runtime before restart: %v", err)
+	}
+	restarted, err := newTestWorkspaceRuntime(t, f.cfg, f.server.Client(), f.root, f.cfg.AgentID, "daemon")
+	if err != nil {
+		t.Fatalf("restart runtime: %v", err)
+	}
+	f.server.installDocumentUpdateHook(t, restarted)
+	if err := restarted.applyWorkspace(f.ctx, &workspaceResponse{RootDocumentID: f.server.rootDocumentID}); err != nil {
+		t.Fatalf("apply workspace after restart: %v", err)
+	}
+	return restarted
+}
+
+func TestWorkspaceRuntimeReplacementWithoutWatcherAfterDeleteCandidateCancelsAtPropagationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		symlink bool
+	}{
+		{name: "regular file"},
+		{name: "symlinked file", symlink: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newDeleteCandidateRuntimeFixture(t)
+			fixture.confirmDeleteCandidate(t)
+
+			const replacement = "replacement without watcher delivery\n"
+			contentPath := fixture.path
+			if tc.symlink {
+				contentPath = filepath.Join(fixture.root, "replacement-target.md")
+			}
+			if err := os.WriteFile(contentPath, []byte(replacement), 0o644); err != nil {
+				t.Fatalf("write replacement: %v", err)
+			}
+			if tc.symlink {
+				if err := os.Symlink(contentPath, fixture.path); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+			if fixture.tracked.isLocalDeleted() {
+				t.Fatal("commit-time present observation did not cancel the delete candidate")
+			}
+			fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, false)
+			fixture.server.assertContents(t, map[string]string{fixture.relative: replacement})
+			assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+		})
+	}
+}
+
+func TestWorkspaceRuntimeCreateDuringDeletePropagationCancelsStaleCandidate(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	const replacement = "replacement with watcher delivery\n"
+	observed := false
+	fixture.runtime.replica.observeMissingPath = func(gotPath string) (string, bool, error) {
+		if observed {
+			return observeTrackedFileAfterMissingSignal(gotPath)
+		}
+		observed = true
+		if gotPath != fixture.path {
+			t.Fatalf("commit-time observation path = %q, want %q", gotPath, fixture.path)
+		}
+		if err := os.WriteFile(fixture.path, []byte(replacement), 0o644); err != nil {
+			t.Fatalf("write interleaved replacement: %v", err)
+		}
+		if err := fixture.runtime.replica.handleWatcherEvent(
+			fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+			time.Now(),
+		); err != nil {
+			t.Fatalf("handle interleaved create: %v", err)
+		}
+		// Model a completed absence read whose result reaches reconciliation
+		// after the newer CREATE observation.
+		return "", false, nil
+	}
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	if !observed {
+		t.Fatal("delete propagation did not perform its boundary observation")
+	}
+	if fixture.tracked.isLocalDeleted() {
+		t.Fatal("newer CREATE observation did not cancel the stale delete candidate")
+	}
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, false)
+	fixture.server.assertContents(t, map[string]string{fixture.relative: replacement})
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+}
+
+func TestWorkspaceRuntimeDeletePropagationObservationErrorRetainsCandidate(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	observeErr := errors.New("injected propagation observation failure")
+	fixture.runtime.replica.observeMissingPath = func(string) (string, bool, error) {
+		return "", false, observeErr
+	}
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); !errors.Is(err, observeErr) {
+		t.Fatalf("reconcile delete candidate error = %v, want %v", err, observeErr)
+	}
+	if !fixture.tracked.isLocalDeleted() {
+		t.Fatal("observation error consumed the reversible delete candidate")
+	}
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, false)
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+}
+
+func TestWorkspaceRuntimeDirectoryReplacementBeforeLocalDeleteCommitCompletesTombstone(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	if err := os.Mkdir(fixture.path, 0o755); err != nil {
+		t.Fatalf("create directory replacement: %v", err)
+	}
+	if err := fixture.runtime.replica.handleWatcherEvent(
+		fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+		time.Now(),
+	); err != nil {
+		t.Fatalf("handle directory replacement create: %v", err)
+	}
+
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	info, err := os.Lstat(fixture.path)
+	if err != nil {
+		t.Fatalf("lstat directory replacement: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("replacement mode = %v, want directory", info.Mode())
+	}
+	assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+}
+
+func TestWorkspaceRuntimeReplacementAfterCommittedLocalDeleteIsArchivedByDocumentID(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replacement string
+	}{
+		{name: "changed bytes", replacement: "replacement after delete commit\n"},
+		{name: "same bytes", replacement: "base\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newDeleteCandidateRuntimeFixture(t)
+			fixture.confirmDeleteCandidate(t)
+
+			originalSend := fixture.runtime.sendDocumentUpdate
+			injected := false
+			fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+				if documentID == fixture.server.rootDocumentID {
+					persisted, err := rootLocalDeleteIntentExists(fixture.runtime.docCache, documentID, fixture.tracked.DocumentID)
+					if err != nil {
+						return err
+					}
+					if !persisted {
+						return errors.New("root tombstone send started before its local-delete intent was durable")
+					}
+				}
+				if err := originalSend(ctx, documentID, record); err != nil {
+					return err
+				}
+				if documentID != fixture.server.rootDocumentID || injected {
+					return nil
+				}
+				injected = true
+				return os.WriteFile(fixture.path, []byte(tc.replacement), 0o644)
+			}
+
+			reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+			if !injected {
+				t.Fatal("test did not place the replacement after the root tombstone commit")
+			}
+			fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+			assertWorkspaceFileMissing(t, fixture.root, fixture.relative)
+			assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, tc.replacement)
+			assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+			assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+		})
+	}
+}
+
+func TestWorkspaceRuntimeMovedReplacementAfterCommittedLocalDeleteIsArchivedByDocumentID(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	const replacement = "replacement moved after delete commit\n"
+	originalSend := fixture.runtime.sendDocumentUpdate
+	injected := false
+	fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if err := originalSend(ctx, documentID, record); err != nil {
+			return err
+		}
+		if documentID != fixture.server.rootDocumentID || injected {
+			return nil
+		}
+		injected = true
+		return os.WriteFile(fixture.path, []byte(replacement), 0o644)
+	}
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); err != nil {
+		t.Fatalf("commit local delete: %v", err)
+	}
+	if !injected {
+		t.Fatal("test did not place the replacement after the root tombstone commit")
+	}
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, true)
+
+	now := time.Now()
+	if err := fixture.runtime.replica.handleWatcherEvent(
+		fsnotify.Event{Name: fixture.path, Op: fsnotify.Create},
+		now,
+	); err != nil {
+		t.Fatalf("handle replacement create: %v", err)
+	}
+	movedPath := filepath.Join(fixture.root, "docs", "moved-after-commit.md")
+	if err := os.Rename(fixture.path, movedPath); err != nil {
+		t.Fatalf("move replacement: %v", err)
+	}
+	if err := fixture.runtime.replica.handleWatcherEvent(
+		fsnotify.Event{Name: fixture.path, Op: fsnotify.Rename},
+		now,
+	); err != nil {
+		t.Fatalf("handle replacement rename: %v", err)
+	}
+	if err := fixture.runtime.replica.handleWatcherEvent(
+		fsnotify.Event{Name: movedPath, Op: fsnotify.Create},
+		now,
+	); err != nil {
+		t.Fatalf("handle moved replacement create: %v", err)
+	}
+	if pending, err := fixture.runtime.processPathChanges(fixture.ctx); err != nil {
+		t.Fatalf("process replacement move: %v", err)
+	} else if pending {
+		t.Fatal("identity-correlated replacement move remained pending")
+	}
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, movedPath)
+	const secondReplacement = "second replacement at persisted path\n"
+	if err := os.WriteFile(fixture.path, []byte(secondReplacement), 0o644); err != nil {
+		t.Fatalf("write second replacement at persisted path: %v", err)
+	}
+
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	assertWorkspaceFileMissing(t, fixture.root, fixture.relative)
+	if _, err := os.Stat(movedPath); err == nil {
+		t.Fatalf("moved replacement %s still exists", movedPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat moved replacement %s: %v", movedPath, err)
+	}
+	assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, replacement)
+	assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, secondReplacement)
+	assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+}
+
+func TestWorkspaceRuntimeNonRegularOccupantAfterCommittedLocalDeleteCompletesTombstone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		create func(*testing.T, string)
+		assert func(*testing.T, string)
+	}{
+		{
+			name: "directory",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatalf("create directory occupant: %v", err)
+				}
+			},
+			assert: func(t *testing.T, path string) {
+				t.Helper()
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatalf("lstat directory occupant: %v", err)
+				}
+				if !info.IsDir() {
+					t.Fatalf("occupant mode = %v, want directory", info.Mode())
+				}
+			},
+		},
+		{
+			name: "dangling symlink",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Symlink("missing-target", path); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+			assert: func(t *testing.T, path string) {
+				t.Helper()
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatalf("lstat symlink occupant: %v", err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("occupant mode = %v, want symlink", info.Mode())
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newDeleteCandidateRuntimeFixture(t)
+			fixture.confirmDeleteCandidate(t)
+
+			originalSend := fixture.runtime.sendDocumentUpdate
+			injected := false
+			fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+				if err := originalSend(ctx, documentID, record); err != nil {
+					return err
+				}
+				if documentID != fixture.server.rootDocumentID || injected {
+					return nil
+				}
+				injected = true
+				tc.create(t, fixture.path)
+				return nil
+			}
+
+			reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+			if !injected {
+				t.Fatal("test did not place the non-regular occupant after the root tombstone commit")
+			}
+			fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+			tc.assert(t, fixture.path)
+			assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+			assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+
+			recoveredRoot := filepath.Join(fixture.root, ".notty", "recovered", safeDocumentCacheName(fixture.tracked.DocumentID))
+			if _, err := os.Lstat(recoveredRoot); err == nil {
+				t.Fatalf("non-regular occupant unexpectedly created recovery directory %s", recoveredRoot)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("lstat recovery directory %s: %v", recoveredRoot, err)
+			}
+		})
+	}
+}
+
+func TestWorkspaceRuntimeCommittedLocalDeleteArchiveErrorRetainsDurableIntentForRetry(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	const replacement = "replacement retained across archive retry\n"
+	originalSend := fixture.runtime.sendDocumentUpdate
+	injected := false
+	fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if err := originalSend(ctx, documentID, record); err != nil {
+			return err
+		}
+		if documentID != fixture.server.rootDocumentID || injected {
+			return nil
+		}
+		injected = true
+		return os.WriteFile(fixture.path, []byte(replacement), 0o644)
+	}
+
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); err != nil {
+		t.Fatalf("commit local delete: %v", err)
+	}
+	if !injected {
+		t.Fatal("test did not place the replacement after the root tombstone commit")
+	}
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, true)
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+
+	recoveredRoot := filepath.Join(fixture.root, ".notty", "recovered")
+	if err := os.MkdirAll(recoveredRoot, 0o755); err != nil {
+		t.Fatalf("mkdir recovered root: %v", err)
+	}
+	archiveBlocker := filepath.Join(recoveredRoot, safeDocumentCacheName(fixture.tracked.DocumentID))
+	if err := os.WriteFile(archiveBlocker, []byte("block archive directory\n"), 0o644); err != nil {
+		t.Fatalf("write archive blocker: %v", err)
+	}
+
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); err == nil {
+		t.Fatal("root projection unexpectedly succeeded while the archive directory was blocked")
+	}
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, true)
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+	assertWorkspaceFileContent(t, fixture.root, fixture.relative, replacement)
+
+	if err := os.Remove(archiveBlocker); err != nil {
+		t.Fatalf("remove archive blocker: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	assertWorkspaceFileMissing(t, fixture.root, fixture.relative)
+	assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, replacement)
+	assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+}
+
+func TestWorkspaceRuntimeLocalDeleteSendFailureRetainsDurableIntentForRetry(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	originalSend := fixture.runtime.sendDocumentUpdate
+	sendErr := errors.New("injected root tombstone send failure")
+	failed := false
+	fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if documentID == fixture.server.rootDocumentID && !failed {
+			failed = true
+			return sendErr
+		}
+		return originalSend(ctx, documentID, record)
+	}
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); !errors.Is(err, sendErr) {
+		t.Fatalf("reconcile local delete error = %v, want %v", err, sendErr)
+	}
+	if !failed {
+		t.Fatal("test did not inject the root tombstone send failure")
+	}
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, true)
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, false)
+	assertRuntimeTrackedAtPath(t, fixture.runtime, fixture.tracked.DocumentID, fixture.path)
+
+	const replacement = "replacement while root tombstone is retrying\n"
+	if err := os.WriteFile(fixture.path, []byte(replacement), 0o644); err != nil {
+		t.Fatalf("write replacement after send failure: %v", err)
+	}
+	fixture.runtime.sendDocumentUpdate = originalSend
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	assertWorkspaceFileMissing(t, fixture.root, fixture.relative)
+	assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, replacement)
+	assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+}
+
+func TestWorkspaceRuntimeCommittedLocalDeleteSurvivesRestartBeforeProjection(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+
+	originalSend := fixture.runtime.sendDocumentUpdate
+	injected := false
+	fixture.runtime.sendDocumentUpdate = func(ctx context.Context, documentID string, record outboxUpdateRecord) error {
+		if err := originalSend(ctx, documentID, record); err != nil {
+			return err
+		}
+		if documentID != fixture.server.rootDocumentID || injected {
+			return nil
+		}
+		injected = true
+		return os.WriteFile(fixture.path, []byte("base\n"), 0o644)
+	}
+	if err := fixture.runtime.reconcileDirtyDocuments(fixture.ctx); err != nil {
+		t.Fatalf("commit local delete: %v", err)
+	}
+	if !injected {
+		t.Fatal("test did not place the same-byte replacement after the root tombstone commit")
+	}
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, true)
+	restarted := fixture.restart(t)
+	previous, err := restarted.docCache.loadRootProjectionEntries(fixture.server.rootDocumentID)
+	if err != nil {
+		t.Fatalf("load root projection after restart: %v", err)
+	}
+	projected, ok := previous[rootEntryIDForDocument(fixture.tracked.DocumentID)]
+	if !ok || !projected.Active || !projected.LocalDeleteIntent {
+		t.Fatalf("durable projection intent after restart = %#v, want active local-delete projection", projected)
+	}
+	// Production startup reconciles the root first, before any content worker
+	// can restore the prior in-memory trackedFile.
+	if err := restarted.enqueueStartupStoreWork(); err != nil {
+		t.Fatalf("enqueue startup store work: %v", err)
+	}
+	if err := restarted.reconcileDirtyDocuments(fixture.ctx); err != nil {
+		t.Fatalf("reconcile committed delete after restart: %v", err)
+	}
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	assertWorkspaceFileMissing(t, fixture.root, fixture.relative)
+	assertRecoveredContent(t, fixture.root, fixture.tracked.DocumentID, "base\n")
+	assertRuntimeUntracked(t, restarted, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, restarted.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+}
+
+func TestWorkspaceRuntimeSuccessfulDeleteProjectionDoesNotPersistAcrossRestart(t *testing.T) {
+	fixture := newDeleteCandidateRuntimeFixture(t)
+	fixture.confirmDeleteCandidate(t)
+	reconcileRuntimeUntilIdle(t, fixture.ctx, fixture.runtime)
+
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	assertRuntimeUntracked(t, fixture.runtime, fixture.tracked.DocumentID)
+	assertRootLocalDeleteIntent(t, fixture.runtime.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+	restarted := fixture.restart(t)
+	assertRootLocalDeleteIntent(t, restarted.docCache, fixture.server.rootDocumentID, fixture.tracked.DocumentID, false)
+
+	const recreated = "new document after projected delete\n"
+	if err := os.WriteFile(fixture.path, []byte(recreated), 0o644); err != nil {
+		t.Fatalf("recreate path after restart: %v", err)
+	}
+	restarted.localCreates.Mark(localCreateCandidate{
+		Root:      fixture.root,
+		Path:      fixture.path,
+		ActorID:   fixture.cfg.AgentID,
+		ActorType: "daemon",
+	})
+	if err := restarted.processLocalCreates(fixture.ctx); err != nil {
+		t.Fatalf("process recreated path: %v", err)
+	}
+	reconcileRuntimeUntilIdle(t, fixture.ctx, restarted)
+
+	newDocumentID := fixture.server.documentIDForPath(t, fixture.relative)
+	if newDocumentID == fixture.tracked.DocumentID {
+		t.Fatalf("recreated path reused deleted document ID %s", newDocumentID)
+	}
+	fixture.server.assertRootEntry(t, fixture.tracked.DocumentID, fixture.relative, true)
+	fixture.server.assertRootEntry(t, newDocumentID, fixture.relative, false)
+	fixture.server.assertContents(t, map[string]string{fixture.relative: recreated})
+	assertWorkspaceFileContent(t, fixture.root, fixture.relative, recreated)
 }
 
 func TestWorkspaceRuntimeProjectsRemoteClientLifecycleToFilesystem(t *testing.T) {
@@ -928,15 +1561,21 @@ func TestWorkspaceRuntimeFilesystemLifecycleRecordsSQLiteAndDaemonCalls(t *testi
 
 type workspaceRuntimeRegressionServer struct {
 	*httptest.Server
-	mu             sync.Mutex
-	nextID         int
-	rootDocumentID string
-	rootDoc        *crdt.Doc
-	byID           map[string]*regressionDocument
-	byPath         map[string]string
-	deleted        map[string]struct{}
-	requests       []string
-	syncUpdates    []regressionSyncUpdate
+	mu                       sync.Mutex
+	nextID                   int
+	rootDocumentID           string
+	rootDoc                  *crdt.Doc
+	byID                     map[string]*regressionDocument
+	byPath                   map[string]string
+	deleted                  map[string]struct{}
+	requests                 []string
+	syncUpdates              []regressionSyncUpdate
+	capabilities             []string
+	reverseGeneration        int64
+	reverseRequests          []string
+	reverseConsumeStatus     int
+	reverseConsumeGeneration int64
+	reverseConsumeGenSet     bool
 }
 
 type regressionDocument struct {
@@ -1000,11 +1639,103 @@ func (s *workspaceRuntimeRegressionServer) handle(w http.ResponseWriter, r *http
 		return
 
 	case r.Method == http.MethodGet && r.URL.Path == "/api/workspace":
-		writeJSONResponse(w, http.StatusOK, &workspaceResponse{RootDocumentID: s.rootDocumentID})
+		writeJSONResponse(w, http.StatusOK, &workspaceResponse{
+			RootDocumentID: s.rootDocumentID,
+			Capabilities:   append([]string(nil), s.capabilities...),
+		})
+		return
+
+	case r.Method == http.MethodPost && r.URL.Path == "/api/documents/reverse-window/open":
+		var req struct {
+			ExpectedWindowGeneration int64 `json:"expectedWindowGeneration"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.reverseRequests = append(s.reverseRequests, "open")
+		if req.ExpectedWindowGeneration != s.reverseGeneration {
+			writeJSONResponse(w, http.StatusOK, map[string]any{
+				"outcome":                 "window_generation_conflict",
+				"currentWindowGeneration": s.reverseGeneration,
+			})
+			return
+		}
+		s.reverseGeneration++
+		now := time.Now().UTC()
+		writeJSONResponse(w, http.StatusOK, map[string]any{
+			"outcome":                 "accepted_new",
+			"windowGeneration":        s.reverseGeneration,
+			"currentWindowGeneration": s.reverseGeneration,
+			"openedAt":                now,
+			"reverseUntil":            now.Add(5 * time.Minute),
+			"tombstoneUpdateId":       s.reverseGeneration,
+		})
+		return
+
+	case r.Method == http.MethodPost && r.URL.Path == "/api/documents/reverse-window/consume":
+		var req struct {
+			WindowGeneration   int64  `json:"windowGeneration"`
+			ContentStateVector []byte `json:"contentStateVector"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.WindowGeneration != s.reverseGeneration || len(req.ContentStateVector) == 0 {
+			http.Error(w, "reverse-window identity mismatch", http.StatusConflict)
+			return
+		}
+		s.reverseRequests = append(s.reverseRequests, "consume")
+		if s.reverseConsumeStatus != 0 {
+			http.Error(w, "injected reverse-window consume status", s.reverseConsumeStatus)
+			return
+		}
+		responseGeneration := s.reverseGeneration
+		if s.reverseConsumeGenSet {
+			responseGeneration = s.reverseConsumeGeneration
+		}
+		writeJSONResponse(w, http.StatusOK, map[string]any{
+			"outcome":          "accepted",
+			"windowGeneration": responseGeneration,
+			"consumedAt":       time.Now().UTC(),
+			"restoreUpdateId":  s.reverseGeneration + 100,
+		})
 		return
 	}
 
 	http.Error(w, "unexpected request", http.StatusNotFound)
+}
+
+func (s *workspaceRuntimeRegressionServer) setCapabilities(capabilities ...string) {
+	s.mu.Lock()
+	s.capabilities = append([]string(nil), capabilities...)
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseGeneration(generation int64) {
+	s.mu.Lock()
+	s.reverseGeneration = generation
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseConsumeStatus(status int) {
+	s.mu.Lock()
+	s.reverseConsumeStatus = status
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) setReverseConsumeGeneration(generation int64) {
+	s.mu.Lock()
+	s.reverseConsumeGeneration = generation
+	s.reverseConsumeGenSet = true
+	s.mu.Unlock()
+}
+
+func (s *workspaceRuntimeRegressionServer) reverseRequestLog() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.reverseRequests...)
 }
 
 func (s *workspaceRuntimeRegressionServer) assertContents(t *testing.T, want map[string]string) {
@@ -1379,6 +2110,16 @@ func assertRecoveredContent(t *testing.T, root, reason, want string) {
 	}
 }
 
+func assertRuntimeTrackedAtPath(t *testing.T, runtime *workspaceRuntime, documentID, path string) {
+	t.Helper()
+	runtime.replica.mu.Lock()
+	defer runtime.replica.mu.Unlock()
+	tracked := runtime.replica.projectedByID[documentID]
+	if tracked == nil || tracked.Path != path || runtime.replica.projectedByPath[path] != tracked {
+		t.Fatalf("document %s is not tracked at %q: %#v", documentID, path, tracked)
+	}
+}
+
 func assertRuntimeUntracked(t *testing.T, runtime *workspaceRuntime, documentID string) {
 	t.Helper()
 	runtime.replica.mu.Lock()
@@ -1386,6 +2127,27 @@ func assertRuntimeUntracked(t *testing.T, runtime *workspaceRuntime, documentID 
 	if tracked := runtime.replica.projectedByID[documentID]; tracked != nil {
 		t.Fatalf("document %s remained tracked after root tombstone: %#v", documentID, tracked)
 	}
+}
+
+func assertRootLocalDeleteIntent(t *testing.T, cache *documentCache, rootDocumentID, documentID string, want bool) {
+	t.Helper()
+	got, err := rootLocalDeleteIntentExists(cache, rootDocumentID, documentID)
+	if err != nil {
+		t.Fatalf("load root local-delete intent for %s: %v", documentID, err)
+	}
+	if got != want {
+		t.Fatalf("root local-delete intent for %s = %v, want %v", documentID, got, want)
+	}
+}
+
+func rootLocalDeleteIntentExists(cache *documentCache, rootDocumentID, documentID string) (bool, error) {
+	if cache == nil || rootDocumentID == "" || documentID == "" {
+		return false, nil
+	}
+	var count int
+	err := cache.db.QueryRow(`select count(*) from root_local_delete_intents
+		where root_document_id = ? and content_document_id = ?`, rootDocumentID, documentID).Scan(&count)
+	return count > 0, err
 }
 
 func assertSQLiteDocumentContent(t *testing.T, cache *documentCache, documentID, want string) {

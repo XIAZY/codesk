@@ -156,6 +156,80 @@ func initPostgresSchemaTables(db *sql.DB) error {
 		)
 		`,
 		`
+		CREATE TABLE IF NOT EXISTS document_reverse_windows (
+			document_id UUID PRIMARY KEY,
+			workspace_id UUID NOT NULL,
+			root_document_id UUID NOT NULL,
+			entry_id TEXT NOT NULL,
+			desired_path TEXT NOT NULL,
+			origin_daemon_id UUID NOT NULL,
+			origin_scope TEXT NOT NULL,
+			window_generation BIGINT,
+			tombstone_operation_id UUID NOT NULL,
+			tombstone_request_fingerprint TEXT NOT NULL,
+			tombstone_update_id BIGINT,
+			opened_at TIMESTAMPTZ NOT NULL,
+			reverse_until TIMESTAMPTZ NOT NULL,
+			restore_operation_id UUID,
+			restore_update_id BIGINT,
+			consumed_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL,
+			CONSTRAINT chk_document_reverse_window_time
+				CHECK (reverse_until > opened_at),
+			CONSTRAINT chk_document_reverse_window_scope
+				CHECK (
+					origin_scope = 'primary'
+					OR origin_scope LIKE 'agent:%'
+				),
+			CONSTRAINT chk_document_reverse_window_generation
+				CHECK (window_generation IS NULL OR window_generation > 0),
+			CONSTRAINT chk_document_reverse_window_consumption
+				CHECK (
+					(consumed_at IS NULL
+						AND restore_operation_id IS NULL
+						AND restore_update_id IS NULL)
+					OR
+					(consumed_at IS NOT NULL
+						AND restore_operation_id IS NOT NULL
+						AND restore_update_id IS NOT NULL)
+				),
+			CONSTRAINT uq_document_reverse_window_tombstone_operation
+				UNIQUE (
+					workspace_id,
+					origin_daemon_id,
+					origin_scope,
+					tombstone_operation_id
+				),
+			CONSTRAINT uq_document_reverse_window_restore_operation
+				UNIQUE (
+					workspace_id,
+					origin_daemon_id,
+					origin_scope,
+					restore_operation_id
+				),
+			CONSTRAINT fk_document_reverse_window_workspace
+				FOREIGN KEY (workspace_id)
+				REFERENCES workspaces(id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_reverse_window_document
+				FOREIGN KEY (workspace_id, document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_reverse_window_root
+				FOREIGN KEY (workspace_id, root_document_id)
+				REFERENCES documents(workspace_id, id)
+				ON DELETE CASCADE,
+			CONSTRAINT fk_document_reverse_window_daemon
+				FOREIGN KEY (workspace_id, origin_daemon_id)
+				REFERENCES daemons(workspace_id, id)
+				ON DELETE CASCADE
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_document_reverse_windows_workspace_until
+			ON document_reverse_windows (workspace_id, reverse_until)
+			WHERE consumed_at IS NULL`,
+		`
 		CREATE TABLE IF NOT EXISTS document_updates (
 			id BIGSERIAL PRIMARY KEY,
 			workspace_id UUID NOT NULL,

@@ -210,6 +210,7 @@ func (e *backendStatusError) Error() string {
 type workspaceResponse struct {
 	CurrentDaemonID string        `json:"currentDaemonId"`
 	RootDocumentID  string        `json:"rootDocumentId"`
+	Capabilities    []string      `json:"capabilities"`
 	Agents          []*agent      `json:"agents"`
 	AgentRuns       []*agentRun   `json:"agentRuns"`
 	Threads         []*thread     `json:"threads"`
@@ -856,6 +857,15 @@ func (s *workspaceRuntime) processLocalCreates(ctx context.Context) error {
 		return nil
 	}
 	candidates := s.localCreates.Drain()
+	reverseResult, err := s.reconcileRootLocalDeleteIntents(ctx, time.Now().UTC(), candidates)
+	if err != nil {
+		for _, candidate := range reverseResult.LocalCreates {
+			s.markLocalCreate(candidate)
+		}
+		return err
+	}
+	s.setNextReverseWindowWake(reverseResult.NextWake)
+	candidates = reverseResult.LocalCreates
 	workspaceLoaded := false
 	loadWorkspace := func() error {
 		if workspaceLoaded {
@@ -1671,11 +1681,36 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 			tracked.clearLocalDirty()
 			continue
 		}
-		actorID, actorType := s.actorForTracked(tracked)
-		if err := s.tombstoneRootFileEntry(ctx, tracked.DocumentID, actorID, actorType); err != nil {
+		present, err := revalidateLocalDeleteCandidate(tracked)
+		if err != nil {
 			return false, err
 		}
-		tracked.untrack()
+		if present {
+			tracked.clearLocalDeleted()
+			tracked.markLocalDirty()
+			if tracked.Owner != nil && tracked.Owner.changes != nil {
+				tracked.Owner.changes.markTrackedPresent(
+					tracked.DocumentID,
+					tracked.Path,
+					statFileIdentity(tracked.Path),
+				)
+			}
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
+		// A newer confirmed-present observation cancels this reversible candidate.
+		if !tracked.isLocalDeleted() {
+			tracked.markLocalDirty()
+			s.markDocumentDirty(tracked.DocumentID)
+			return true, nil
+		}
+		actorID, actorType := s.actorForTracked(tracked)
+		if err := s.tombstoneRootFileEntry(ctx, tracked.DocumentID, actorID, actorType); err != nil {
+			s.markDocumentDirty(s.rootDocumentID)
+			return false, err
+		}
+		// Root projection owns terminal cleanup. The durable intent keeps this
+		// exact document identity recoverable across send retries and restarts.
 		s.markDocumentDirty(s.rootDocumentID)
 		return true, errDocumentRemovedDuringReconcile
 	}
@@ -1708,6 +1743,28 @@ func (s *workspaceRuntime) reconcileLocalMetadataOperations(ctx context.Context,
 		return true, nil
 	}
 	return false, nil
+}
+
+func revalidateLocalDeleteCandidate(tracked *trackedFile) (bool, error) {
+	if tracked == nil {
+		return false, errors.New("revalidate local delete candidate: tracked file is nil")
+	}
+	if strings.TrimSpace(tracked.Path) == "" {
+		return false, fmt.Errorf("revalidate local delete candidate for %q: path is empty", tracked.DocumentID)
+	}
+	var (
+		exists bool
+		err    error
+	)
+	if tracked.Owner != nil {
+		_, exists, err = tracked.Owner.observeTrackedFileAfterMissingSignal(tracked.Path)
+	} else {
+		_, exists, err = observeTrackedFileAfterMissingSignal(tracked.Path)
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-observe tracked file %q before propagating delete: %w", tracked.Path, err)
+	}
+	return exists, nil
 }
 
 func cleanupRemovedDocument(cache *documentCache, entry *documentCacheEntry, documentID string, states []trackedReconcileState) error {
@@ -1943,6 +2000,10 @@ func collectTrackedReconcileStates(trackedFiles []*trackedFile) ([]trackedReconc
 				states = append(states, state)
 				continue
 			}
+		}
+		if tracked.isLocalDeleted() && !tracked.isRemoteDeleted() {
+			states = append(states, state)
+			continue
 		}
 		fs, err := tracked.workspaceFS()
 		if err != nil {
@@ -2274,6 +2335,17 @@ func scanWorkspaceFiles(root string) (map[string]string, error) {
 			return nil
 		}
 		if entry.IsDir() {
+			return nil
+		}
+		occupant, err := classifyWorkspacePathOccupant(path)
+		if err != nil {
+			return err
+		}
+		providesContent, err := workspacePathProvidesFileContent(path, occupant)
+		if err != nil {
+			return err
+		}
+		if !providesContent {
 			return nil
 		}
 		content, err := readFileObservation(path)

@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -127,14 +128,15 @@ type workspaceReplica struct {
 	markDirty  func(documentID string)
 	markCreate func(localCreateCandidate)
 
-	watcher    workspaceWatcher
-	newWatcher func() (workspaceWatcher, error)
-	docCache   *documentCache
-	fs         *WorkspaceFS
-	watchMu    sync.Mutex
-	watched    map[string]struct{}
-	changes    *workspaceChangeIndex
-	reconcile  func(context.Context) error
+	watcher            workspaceWatcher
+	newWatcher         func() (workspaceWatcher, error)
+	docCache           *documentCache
+	fs                 *WorkspaceFS
+	watchMu            sync.Mutex
+	watched            map[string]struct{}
+	changes            *workspaceChangeIndex
+	reconcile          func(context.Context) error
+	observeMissingPath func(string) (string, bool, error)
 
 	mu              sync.Mutex
 	projectedByPath map[string]*trackedFile
@@ -151,17 +153,18 @@ func newWorkspaceReplicaWithFS(
 		actorType = "daemon"
 	}
 	replica := &workspaceReplica{
-		rootDir:         rootDir,
-		actorID:         actorID,
-		actorType:       actorType,
-		markDirty:       markDirty,
-		markCreate:      markCreate,
-		newWatcher:      newFSNotifyWorkspaceWatcher,
-		fs:              fs,
-		watched:         map[string]struct{}{},
-		changes:         newWorkspaceChangeIndex(),
-		projectedByPath: map[string]*trackedFile{},
-		projectedByID:   map[string]*trackedFile{},
+		rootDir:            rootDir,
+		actorID:            actorID,
+		actorType:          actorType,
+		markDirty:          markDirty,
+		markCreate:         markCreate,
+		newWatcher:         newFSNotifyWorkspaceWatcher,
+		fs:                 fs,
+		watched:            map[string]struct{}{},
+		changes:            newWorkspaceChangeIndex(),
+		observeMissingPath: observeTrackedFileAfterMissingSignal,
+		projectedByPath:    map[string]*trackedFile{},
+		projectedByID:      map[string]*trackedFile{},
 	}
 	replica.reconcile = replica.reconcileLocalWorkspace
 	return replica
@@ -536,6 +539,7 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 		}
 		if tracked != nil {
 			r.changes.markTrackedPresent(tracked.DocumentID, path, identity)
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -557,7 +561,15 @@ func (r *workspaceReplica) handleWatcherEvent(event fsnotify.Event, now time.Tim
 
 	if event.Op&fsnotify.Write != 0 {
 		if tracked != nil {
+			_, exists, err := r.observeTrackedFileAfterMissingSignal(path)
+			if err != nil {
+				return fmt.Errorf("observe tracked file %q after write event: %w", path, err)
+			}
+			if !exists {
+				return nil
+			}
 			r.changes.markTrackedPresent(tracked.DocumentID, path, statFileIdentity(path))
+			tracked.clearLocalDeleted()
 			if err := markTrackedLocalDirty(tracked, path); err != nil {
 				return err
 			}
@@ -641,7 +653,20 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 			// File projection can briefly look like a local edit, move, or delete.
 			continue
 		}
+		if !exists {
+			// WalkDir is not a namespace snapshot. A concurrent same-name
+			// replacement can be omitted from one scan, so re-observe a tracked
+			// path before classifying the miss as a move or deletion.
+			current, exists, err = r.observeTrackedFileAfterMissingSignal(tracked.Path)
+			if err != nil {
+				return fmt.Errorf("re-observe tracked file %q after scan miss: %w", tracked.Path, err)
+			}
+		}
 		if exists {
+			tracked.clearLocalDeleted()
+			if r.changes != nil {
+				r.changes.markTrackedPresent(tracked.DocumentID, tracked.Path, statFileIdentity(tracked.Path))
+			}
 			if !tracked.matchesProjectedString(current) {
 				if err := r.handleLocalChange(tracked.Path); err != nil {
 					return err
@@ -683,6 +708,37 @@ func (r *workspaceReplica) reconcileLocalWorkspace(ctx context.Context) error {
 	return nil
 }
 
+func observeTrackedFileAfterMissingSignal(path string) (string, bool, error) {
+	occupant, err := classifyWorkspacePathOccupant(path)
+	if err != nil {
+		return "", false, err
+	}
+	providesContent, err := workspacePathProvidesFileContent(path, occupant)
+	if err != nil {
+		return "", false, err
+	}
+	if !providesContent {
+		return "", false, nil
+	}
+
+	content, err := readFileObservation(path)
+	switch {
+	case err == nil:
+		return string(content), true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return "", false, nil
+	default:
+		return "", false, err
+	}
+}
+
+func (r *workspaceReplica) observeTrackedFileAfterMissingSignal(path string) (string, bool, error) {
+	if r != nil && r.observeMissingPath != nil {
+		return r.observeMissingPath(path)
+	}
+	return observeTrackedFileAfterMissingSignal(path)
+}
+
 func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) (bool, error) {
 	if r == nil || r.changes == nil {
 		return false, nil
@@ -696,7 +752,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 			return true, err
 		}
 	}
-	changes, hasPending := r.changes.drain(now)
+	changes, _ := r.changes.drain(now)
 	for _, move := range changes.LocalMoves {
 		r.mu.Lock()
 		tracked := r.projectedByID[move.DocumentID]
@@ -713,7 +769,33 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 		r.mu.Lock()
 		tracked := r.projectedByID[deletion.DocumentID]
 		r.mu.Unlock()
-		if tracked == nil || tracked.isProjecting() {
+		if tracked == nil || tracked.isProjecting() || tracked.Path != deletion.Path {
+			r.changes.resolvePendingMissing(deletion)
+			continue
+		}
+		current, exists, err := r.observeTrackedFileAfterMissingSignal(deletion.Path)
+		if err != nil {
+			return r.changes.hasPendingMissing(), fmt.Errorf(
+				"re-observe tracked file %q before pending delete: %w",
+				deletion.Path,
+				err,
+			)
+		}
+		if exists {
+			r.changes.markTrackedPresent(
+				tracked.DocumentID,
+				deletion.Path,
+				statFileIdentity(deletion.Path),
+			)
+			tracked.clearLocalDeleted()
+			if !tracked.matchesProjectedString(current) {
+				if err := r.handleLocalChange(deletion.Path); err != nil {
+					return r.changes.hasPendingMissing(), err
+				}
+			}
+			continue
+		}
+		if !r.changes.resolvePendingMissing(deletion) {
 			continue
 		}
 		tracked.markLocalDeleted()
@@ -730,7 +812,7 @@ func (r *workspaceReplica) drainPathChanges(ctx context.Context, now time.Time) 
 	for _, documentID := range changes.DirtyDocumentIDs {
 		r.markDocumentDirty(documentID)
 	}
-	return hasPending, nil
+	return r.changes.hasPendingMissing(), nil
 }
 
 func (r *workspaceReplica) discoverLocalCreatesInDir(dir string) error {
