@@ -1,12 +1,18 @@
-# notty
+# Codesk
 
-notty is a multi-tenant collaborative workspace where humans and long-running AI agents work in the same file tree, discuss document ranges in anchored threads, and coordinate through daemon-managed local workspaces.
+Codesk is a multi-tenant collaborative workspace where humans and long-running AI agents work in the same file tree, discuss document ranges in anchored threads, and coordinate through daemon-managed local workspaces.
+
+> [!NOTE]
+> **Codesk** is the public product and brand. **Notty** is the internal codename.
+> Existing `notty`-prefixed environment variables, headers, binaries, paths,
+> infrastructure names, and database identifiers are compatibility-sensitive
+> technical names and remain unchanged until they are migrated deliberately.
 
 This README is the project encyclopedia. It is intended for product managers, designers, frontend agents, backend agents, and new engineers who have no prior context. It describes the product, its concepts, its components, the current user flows, and the API contracts those flows depend on.
 
 ## One Sentence
 
-notty is Google Docs plus a shared repo-like filesystem plus resident Codex agents that can edit files and discuss work in anchored threads.
+Codesk is Google Docs plus a shared repo-like filesystem plus resident Codex agents that can edit files and discuss work in anchored threads.
 
 ## Product Goals
 
@@ -19,11 +25,11 @@ notty is Google Docs plus a shared repo-like filesystem plus resident Codex agen
 
 ## Product Non-Goals
 
-- notty is not a chat app with a document attached.
-- notty is not a generic task queue for one-off agents.
-- notty is not trying to support document-text mentions yet.
-- notty no longer has separate comments, proposals, or merge-request concepts.
-- notty should not require the frontend to load every document's CRDT history to render the workspace shell.
+- Codesk is not a chat app with a document attached.
+- Codesk is not a generic task queue for one-off agents.
+- Codesk is not trying to support document-text mentions yet.
+- Codesk no longer has separate comments, proposals, or merge-request concepts.
+- Codesk should not require the frontend to load every document's CRDT history to render the workspace shell.
 
 ## Key Features
 
@@ -74,7 +80,7 @@ A thread is the only discussion primitive. It can be document-level or anchored 
 
 ### Daemon
 
-A daemon is a workspace-scoped process that syncs notty documents to local disk and runs agents. It authenticates with a daemon token minted by the backend. A daemon owns zero or more agents.
+A daemon is a workspace-scoped process that syncs Codesk documents to local disk and runs agents. It authenticates with a daemon token minted by the backend. A daemon owns zero or more agents.
 
 ### Agent
 
@@ -521,31 +527,31 @@ The installers do not require Codex. They keep `NOTTY_CODEX_COMMAND` as configur
 macOS or Linux:
 
 ```sh
-curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
-  --backend-url https://api.nottyai.co \
+curl -fsSL https://static.getcodesk.com/daemons/install.sh | sh -s -- \
+  --backend-url https://api.getcodesk.com \
   --workspace-id ws_... \
   --daemon-token nottyd_... \
-  --static-base https://static.nottyai.co/daemons
+  --static-base https://static.getcodesk.com/daemons
 ```
 
 Windows AMD64 or ARM64, with the native release selected automatically, from PowerShell 5.1 or newer:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.getcodesk.com/daemons/install.ps1'
 $codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
 & ([ScriptBlock]::Create($codeskInstallerSource)) `
-  -BackendUrl 'https://api.nottyai.co' `
+  -BackendUrl 'https://api.getcodesk.com' `
   -WorkspaceId 'ws_...' `
   -DaemonToken 'nottyd_...' `
-  -StaticBase 'https://static.nottyai.co/daemons'
+  -StaticBase 'https://static.getcodesk.com/daemons'
 ```
 
 Global Windows uninstall (the `-All` confirmation is required):
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$codeskUninstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/uninstall.ps1'
+$codeskUninstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.getcodesk.com/daemons/uninstall.ps1'
 $codeskUninstallerSource = if ($codeskUninstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskUninstallerResponse.Content) } else { [string]$codeskUninstallerResponse.Content }
 & ([ScriptBlock]::Create($codeskUninstallerSource)) -All
 ```
@@ -1562,17 +1568,17 @@ Local development services:
 
 Production services:
 
-- Static homepage is hosted at `https://nottyai.co`.
-- Static frontend is hosted at `https://app.nottyai.co`.
-- Static daemon installer and artifacts are hosted at `https://static.nottyai.co/daemons`.
-- The production server runs Docker Compose with `nginx` and `backend`. Nginx is the only public container, enforces `api.nottyai.co` host matching, and proxies to the private backend service. Backend connects to external Postgres through `NOTTY_DATABASE_URL`.
+- Static homepage is hosted at `https://getcodesk.com`.
+- Static frontend is hosted at `https://app.getcodesk.com`.
+- Static daemon installer and artifacts are hosted at `https://static.getcodesk.com/daemons`.
+- The production server runs Docker Compose with `nginx` and `backend`. Nginx is the only public container, enforces `api.getcodesk.com` host matching, and proxies to the private backend service. Backend connects to external Postgres through `NOTTY_DATABASE_URL`.
 
 Default production routes:
 
-- Homepage: `https://nottyai.co`
-- App: `https://app.nottyai.co`
-- API and websockets: `https://api.nottyai.co`
-- Daemon downloads: `https://static.nottyai.co/daemons`
+- Homepage: `https://getcodesk.com`
+- App: `https://app.getcodesk.com`
+- API and websockets: `https://api.getcodesk.com`
+- Daemon downloads: `https://static.getcodesk.com/daemons`
 
 For product development from a source checkout, `make dev` is the supported one-command way to start the local backend, frontend, static, and Postgres stack. It first builds host-platform daemon artifacts into `dist/static/daemons`, then starts Docker Compose. Local dev does not run nginx. Local dev defaults `NOTTY_FRONTEND_ORIGIN`, `NOTTY_BACKEND_ORIGIN`, and `NOTTY_STATIC_ORIGIN` to localhost values instead of production domains. The local `static` service serves `dist/static` at `http://localhost:${NOTTY_STATIC_PORT:-5174}`, mirroring production’s separate static origin instead of coupling daemon downloads to the frontend.
 
@@ -1581,24 +1587,24 @@ Start an external daemon after creating a daemon token in the frontend. The fron
 macOS or Linux:
 
 ```sh
-curl -fsSL https://static.nottyai.co/daemons/install.sh | sh -s -- \
-  --backend-url https://api.nottyai.co \
+curl -fsSL https://static.getcodesk.com/daemons/install.sh | sh -s -- \
+  --backend-url https://api.getcodesk.com \
   --workspace-id ws_... \
   --daemon-token nottyd_... \
-  --static-base https://static.nottyai.co/daemons
+  --static-base https://static.getcodesk.com/daemons
 ```
 
 Windows AMD64 or ARM64, with the native release selected automatically:
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.nottyai.co/daemons/install.ps1'
+$codeskInstallerResponse = Invoke-WebRequest -UseBasicParsing 'https://static.getcodesk.com/daemons/install.ps1'
 $codeskInstallerSource = if ($codeskInstallerResponse.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($codeskInstallerResponse.Content) } else { [string]$codeskInstallerResponse.Content }
 & ([ScriptBlock]::Create($codeskInstallerSource)) `
-  -BackendUrl 'https://api.nottyai.co' `
+  -BackendUrl 'https://api.getcodesk.com' `
   -WorkspaceId 'ws_...' `
   -DaemonToken 'nottyd_...' `
-  -StaticBase 'https://static.nottyai.co/daemons'
+  -StaticBase 'https://static.getcodesk.com/daemons'
 ```
 
 Build all local artifacts without publishing:
@@ -1620,7 +1626,7 @@ Every releasable component has one local build command and one deploy command:
 | Homepage only | `make homepage-build` | `make homepage-deploy` |
 | Backend image and service | `make backend-build` | `make backend-deploy` |
 
-`make homepage-deploy` publishes only `https://nottyai.co` from the `homepage`
+`make homepage-deploy` publishes only `https://getcodesk.com` from the `homepage`
 directory. It skips the Vite build entirely, so it is the fast path for
 homepage copy, metadata, and static-asset edits. Use `make frontend-deploy`
 when the app bundle changed too; it still publishes both the app and the
@@ -1690,11 +1696,12 @@ as `NOTTY_DATABASE_URL`, `NOTTY_JWT_SECRET`, and
 that URL; bucket names are supplied through `R2_HOMEPAGE_BUCKET`,
 `R2_APP_BUCKET`, `R2_DAEMONS_BUCKET`, and `R2_DESKTOP_BUCKET`.
 
-Current static routing uses separate R2 buckets:
+Current static routing uses Codesk's public domains and the existing
+codename-derived R2 bucket identifiers:
 
-- `nottyai.co`: R2 custom domain connected to `notty-homepage-prod`.
-- `app.nottyai.co`: R2 custom domain connected to `notty-app-prod`.
-- `static.nottyai.co`: R2 custom domain connected to `notty-static-prod`.
+- `getcodesk.com`: R2 custom domain connected to `notty-homepage-prod`.
+- `app.getcodesk.com`: R2 custom domain connected to `notty-app-prod`.
+- `static.getcodesk.com`: R2 custom domain connected to `notty-static-prod`.
 
 `scripts/upload-r2.sh` is the shared R2 uploader used by every static deploy.
 Frontend roots stay in their dedicated buckets, daemon artifacts use
@@ -1711,9 +1718,9 @@ make backend-deploy
 
 Production API traffic is routed by the Compose-managed nginx service. The nginx config lives at `deploy/nginx/notty-api.conf` and is mounted into the nginx container as `/etc/nginx/conf.d/default.conf`. It handles:
 
-- Host matching for `api.nottyai.co`; unmatched hosts are closed.
+- Host matching for `api.getcodesk.com` and the legacy `api.nottyai.co` alias; unmatched hosts are closed.
 - TLS termination on `443` using `NOTTY_TLS_CERT_FILE` and `NOTTY_TLS_KEY_FILE`; port `80` only redirects to HTTPS.
-- CORS for `https://app.nottyai.co`, `https://nottyai.co`, and local development origins.
+- CORS for the Codesk origins, the legacy `nottyai.co` origins, and local development origins.
 - `Authorization`, `Content-Type`, and `X-Notty-Acting-Agent-ID` request headers.
 - Websocket upgrades for `/ws/...`.
 - Hiding backend `Access-Control-*` headers so production responses do not contain duplicate CORS headers.
@@ -1764,8 +1771,8 @@ Important production server defaults in `deploy/env/prod.server.env`:
 Important frontend environment variables:
 
 - `NOTTY_FRONTEND_ORIGIN`: public frontend origin, local default `http://localhost:5173`, production default `https://app.getcodesk.com`.
-- `NOTTY_BACKEND_ORIGIN`: frontend API/websocket origin, local default `http://localhost:8080`, production default `https://api.nottyai.co`.
-- `NOTTY_STATIC_ORIGIN`: static artifact origin, local default `http://localhost:5173`, production default `https://static.nottyai.co`.
+- `NOTTY_BACKEND_ORIGIN`: frontend API/websocket origin, local default `http://localhost:8080`, production default `https://api.getcodesk.com`.
+- `NOTTY_STATIC_ORIGIN`: static artifact origin, local default `http://localhost:5173`, production default `https://static.getcodesk.com`.
 - `NOTTY_FRONTEND_PORT`: loopback-only frontend dev port, default `5173`.
 - `NOTTY_BACKEND_PORT`: loopback-only backend dev port, default `8080`.
 - `NOTTY_DAEMON_STATIC_BASE`: daemon artifact origin override. Defaults to `${NOTTY_STATIC_ORIGIN}/daemons`.
