@@ -1,19 +1,17 @@
 name: Windows builder image
 
 on:
-  pull_request:
-    paths:
-      - deploy/windows-desktop/Dockerfile
-      - deploy/windows-desktop/Codesk.wixproj
   push:
-    branches: [main]
+    branches:
+      - "**"
     paths:
       - deploy/windows-desktop/Dockerfile
       - deploy/windows-desktop/Codesk.wixproj
+  workflow_dispatch:
 
 concurrency:
-  group: windows-builder-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: windows-builder-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -39,9 +37,9 @@ jobs:
           } | sha256sum | cut -d ' ' -f 1)"
           printf 'image=%s:sha-%s\n' "$WINDOWS_BUILDER_REPOSITORY" "$image_hash" >> "$GITHUB_OUTPUT"
 
-  pr-builder-image:
-    name: Build Windows builder image (pull request)
-    if: github.event_name == 'pull_request'
+  branch-builder-image:
+    name: Build Windows builder image (branch)
+    if: github.ref != 'refs/heads/main'
     needs: builder-key
     runs-on: [self-hosted, Windows]
     timeout-minutes: 60
@@ -57,7 +55,7 @@ jobs:
             default { throw "Unsupported native Windows runner architecture: ${{ runner.arch }}" }
           }
           "image=${{ needs.builder-key.outputs.image }}-$architecture" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-      - name: Build the pull-request image locally
+      - name: Build the branch image locally
         shell: powershell
         run: |
           ./scripts/build-windows-gui-builder-image.ps1 `
@@ -66,7 +64,7 @@ jobs:
 
   main-builder-image:
     name: Build and publish Windows builder image (main)
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: builder-key
     outputs:
       image: ${{ steps.platform.outputs.image }}
@@ -120,7 +118,7 @@ jobs:
 
   builder-manifest:
     name: Publish Windows builder manifest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     needs: main-builder-image
     permissions:
       contents: read

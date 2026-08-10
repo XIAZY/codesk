@@ -90,23 +90,24 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 		name, target, old, replacement string
 	}{
 		{"CI can publish packages", "ci", "      packages: read\n    uses: ./.github/workflows/windows-native.yml", "      packages: write\n    uses: ./.github/workflows/windows-native.yml"},
-		{"CI runs native validation concurrently on main", "ci", "if: github.event_name == 'pull_request'", "if: always()"},
+		{"CI accepts fork pull requests", "ci", "on:\n  push:", "on:\n  pull_request:\n  push:"},
+		{"CI runs native validation concurrently on main", "ci", "if: github.ref != 'refs/heads/main'", "if: always()"},
 		{"CI bypasses reusable native workflow", "ci", "uses: ./.github/workflows/windows-native.yml", "uses: actions/checkout@v4"},
-		{"builder workflow stops building pull requests", "builder", "on:\n  pull_request:\n    paths:", "on:\n  workflow_dispatch:\n    paths:"},
-		{"builder workflow can publish off main", "builder", "branches: [main]", "branches: ['**']"},
-		{"Dockerfile leaves pull-request build path gate", "builder", "  pull_request:\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "  pull_request:\n    paths:\n      - deploy/windows-desktop/Codesk.wixproj"},
-		{"WiX project leaves main publication path gate", "builder", "  push:\n    branches: [main]\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "  push:\n    branches: [main]\n    paths:\n      - deploy/windows-desktop/Dockerfile"},
+		{"builder workflow accepts fork pull requests", "builder", "on:\n  push:", "on:\n  pull_request:\n  push:"},
+		{"builder workflow can publish off main", "builder", "name: Build and publish Windows builder image (main)\n    if: github.ref == 'refs/heads/main'", "name: Build and publish Windows builder image (main)\n    if: always()"},
+		{"Dockerfile leaves trusted branch build path gate", "builder", "  push:\n    branches:\n      - \"**\"\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "  push:\n    branches:\n      - \"**\"\n    paths:\n      - deploy/windows-desktop/Codesk.wixproj"},
+		{"WiX project leaves trusted branch build path gate", "builder", "  push:\n    branches:\n      - \"**\"\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj", "  push:\n    branches:\n      - \"**\"\n    paths:\n      - deploy/windows-desktop/Dockerfile"},
 		{"Dockerfile leaves image key", "builder", "sha256sum deploy/windows-desktop/Dockerfile", "printf Dockerfile"},
 		{"WiX project leaves image key", "builder", "sha256sum deploy/windows-desktop/Codesk.wixproj", "printf Codesk.wixproj"},
 		{"builder key pins the Linux runner architecture", "builder", "name: Resolve Windows builder image\n    runs-on: [self-hosted, Linux]", "name: Resolve Windows builder image\n    runs-on: [self-hosted, Linux, ARM64]"},
-		{"pull-request builder pins the Windows runner architecture", "builder", "name: Build Windows builder image (pull request)\n    if: github.event_name == 'pull_request'\n    needs: builder-key\n    runs-on: [self-hosted, Windows]", "name: Build Windows builder image (pull request)\n    if: github.event_name == 'pull_request'\n    needs: builder-key\n    runs-on: [self-hosted, Windows, ARM64]"},
-		{"main builder pins the Windows runner architecture", "builder", "name: Build and publish Windows builder image (main)\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: builder-key\n    outputs:", "name: Build and publish Windows builder image (main)\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: builder-key\n    runs-on: [self-hosted, Windows, ARM64]\n    outputs:"},
-		{"manifest pins the Linux runner architecture", "builder", "name: Publish Windows builder manifest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: main-builder-image\n    permissions:\n      contents: read\n      packages: write\n    runs-on: [self-hosted, Linux]", "name: Publish Windows builder manifest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: main-builder-image\n    permissions:\n      contents: read\n      packages: write\n    runs-on: [self-hosted, Linux, ARM64]"},
-		{"pull-request builder hard-codes the architecture image tag", "builder", `name: Build the pull-request image locally`, `name: Build the pull-request image locally\n        # image=${{ needs.builder-key.outputs.image }}-arm64`},
+		{"branch builder pins the Windows runner architecture", "builder", "name: Build Windows builder image (branch)\n    if: github.ref != 'refs/heads/main'\n    needs: builder-key\n    runs-on: [self-hosted, Windows]", "name: Build Windows builder image (branch)\n    if: github.ref != 'refs/heads/main'\n    needs: builder-key\n    runs-on: [self-hosted, Windows, ARM64]"},
+		{"main builder pins the Windows runner architecture", "builder", "name: Build and publish Windows builder image (main)\n    if: github.ref == 'refs/heads/main'\n    needs: builder-key\n    outputs:", "name: Build and publish Windows builder image (main)\n    if: github.ref == 'refs/heads/main'\n    needs: builder-key\n    runs-on: [self-hosted, Windows, ARM64]\n    outputs:"},
+		{"manifest pins the Linux runner architecture", "builder", "name: Publish Windows builder manifest\n    if: github.ref == 'refs/heads/main'\n    needs: main-builder-image\n    permissions:\n      contents: read\n      packages: write\n    runs-on: [self-hosted, Linux]", "name: Publish Windows builder manifest\n    if: github.ref == 'refs/heads/main'\n    needs: main-builder-image\n    permissions:\n      contents: read\n      packages: write\n    runs-on: [self-hosted, Linux, ARM64]"},
+		{"branch builder hard-codes the architecture image tag", "builder", `name: Build the branch image locally`, `name: Build the branch image locally\n        # image=${{ needs.builder-key.outputs.image }}-arm64`},
 		{"missing architecture image still fails probe step", "builder", "          exit 0\n", ""},
-		{"pull-request builder construction removed", "builder", "      - name: Build the pull-request image locally\n        shell: powershell\n        run: |\n          ./scripts/build-windows-gui-builder-image.ps1", "      - name: Build the pull-request image locally\n        shell: powershell\n        run: |\n          Write-Host \"builder skipped\""},
-		{"pull-request builder logs into registry", "builder", "      - name: Build the pull-request image locally", "      - uses: docker/login-action@v3\n      - name: Build the pull-request image locally"},
-		{"pull-request builder pushes to registry", "builder", "            -BuilderImage \"${{ steps.platform.outputs.image }}\"", "            -BuilderImage \"${{ steps.platform.outputs.image }}\"\n          docker push \"${{ steps.platform.outputs.image }}\""},
+		{"branch builder construction removed", "builder", "      - name: Build the branch image locally\n        shell: powershell\n        run: |\n          ./scripts/build-windows-gui-builder-image.ps1", "      - name: Build the branch image locally\n        shell: powershell\n        run: |\n          Write-Host \"builder skipped\""},
+		{"branch builder logs into registry", "builder", "      - name: Build the branch image locally", "      - uses: docker/login-action@v3\n      - name: Build the branch image locally"},
+		{"branch builder pushes to registry", "builder", "            -BuilderImage \"${{ steps.platform.outputs.image }}\"", "            -BuilderImage \"${{ steps.platform.outputs.image }}\"\n          docker push \"${{ steps.platform.outputs.image }}\""},
 		{"architecture image not pushed", "builder", "& docker push $tag", "Write-Host \"push skipped\""},
 		{"immutable native image is not verified", "builder", "docker manifest inspect \"$ARCHITECTURE_IMAGE\" >/dev/null", "printf 'immutable image unchecked\\n'"},
 		{"published latest bypasses the native architecture image", "builder", "docker manifest create \"$latest\" \"$ARCHITECTURE_IMAGE\"", "docker manifest create \"$latest\" \"$IMAGE-arm64\""},
@@ -169,15 +170,16 @@ func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
 func checkWindowsNativeCIContract(ci, builder, native string) error {
 	for required, count := range map[string]int{
 		"name: CI": 1,
-		"if: github.event_name == 'pull_request'": 1,
-		"packages: read": 1,
-		"uses: ./.github/workflows/windows-native.yml": 1,
+		"on:\n  push:\n    branches:\n      - \"**\"\n  workflow_dispatch:": 1,
+		"if: github.ref != 'refs/heads/main'":                               1,
+		"packages: read":                                                    1,
+		"uses: ./.github/workflows/windows-native.yml":                      1,
 	} {
 		if got := strings.Count(ci, required); got != count {
 			return fmt.Errorf("read-only CI source count for %q = %d, want %d", required, got, count)
 		}
 	}
-	for _, forbidden := range []string{"packages: write", "docker push", "docker manifest", "build-windows-gui-builder-image", "WINDOWS_BUILDER_REPOSITORY"} {
+	for _, forbidden := range []string{"pull_request:", "pull_request_target:", "packages: write", "docker push", "docker manifest", "build-windows-gui-builder-image", "WINDOWS_BUILDER_REPOSITORY"} {
 		if strings.Contains(ci, forbidden) {
 			return fmt.Errorf("CI owns forbidden builder publication source %q", forbidden)
 		}
@@ -185,18 +187,18 @@ func checkWindowsNativeCIContract(ci, builder, native string) error {
 
 	for required, count := range map[string]int{
 		"name: Windows builder image\n": 1,
-		"  pull_request:\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj\n  push:\n    branches: [main]\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj": 1,
-		"group: windows-builder-${{ github.event.pull_request.number || github.ref }}": 1,
-		"cancel-in-progress: ${{ github.event_name == 'pull_request' }}":               1,
-		"if: github.event_name == 'pull_request'":                                      1,
-		"if: github.event_name == 'push' && github.ref == 'refs/heads/main'":           2,
-		"packages: write": 2,
+		"  push:\n    branches:\n      - \"**\"\n    paths:\n      - deploy/windows-desktop/Dockerfile\n      - deploy/windows-desktop/Codesk.wixproj\n  workflow_dispatch:": 1,
+		"group: windows-builder-${{ github.ref }}":                          1,
+		"cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}":        1,
+		"if: github.ref != 'refs/heads/main'":                               1,
+		"if: github.ref == 'refs/heads/main'":                               2,
+		"packages: write":                                                   2,
 		"WINDOWS_BUILDER_REPOSITORY: ghcr.io/xiazy/notty-windows-builder":   1,
 		"sha256sum deploy/windows-desktop/Dockerfile":                       1,
 		"sha256sum deploy/windows-desktop/Codesk.wixproj":                   1,
 		"runs-on: [self-hosted, Linux]":                                     2,
 		"runs-on: [self-hosted, Windows]":                                   2,
-		"name: Build Windows builder image (pull request)":                  1,
+		"name: Build Windows builder image (branch)":                        1,
 		"name: Build and publish Windows builder image (main)":              1,
 		`$architecture = switch ("${{ runner.arch }}")`:                     2,
 		`"X64" { "amd64" }`:                                                 2,
@@ -215,36 +217,36 @@ func checkWindowsNativeCIContract(ci, builder, native string) error {
 			return fmt.Errorf("dedicated builder workflow source count for %q = %d, want %d", required, got, count)
 		}
 	}
-	prStart := strings.Index(builder, "\n  pr-builder-image:\n")
+	branchStart := strings.Index(builder, "\n  branch-builder-image:\n")
 	mainStart := strings.Index(builder, "\n  main-builder-image:\n")
 	manifestStart := strings.Index(builder, "\n  builder-manifest:\n")
-	if prStart < 0 || mainStart <= prStart || manifestStart <= mainStart {
-		return fmt.Errorf("dedicated builder workflow does not separate PR build, main publication, and manifest jobs")
+	if branchStart < 0 || mainStart <= branchStart || manifestStart <= mainStart {
+		return fmt.Errorf("dedicated builder workflow does not separate branch build, main publication, and manifest jobs")
 	}
-	prJob := builder[prStart:mainStart]
+	branchJob := builder[branchStart:mainStart]
 	for required, count := range map[string]int{
-		"if: github.event_name == 'pull_request'":                      1,
+		"if: github.ref != 'refs/heads/main'":                          1,
 		"runs-on: [self-hosted, Windows]":                              1,
 		`$architecture = switch ("${{ runner.arch }}")`:                1,
 		`"image=${{ needs.builder-key.outputs.image }}-$architecture"`: 1,
 		"./scripts/build-windows-gui-builder-image.ps1":                1,
 	} {
-		if got := strings.Count(prJob, required); got != count {
-			return fmt.Errorf("pull-request builder source count for %q = %d, want %d", required, got, count)
+		if got := strings.Count(branchJob, required); got != count {
+			return fmt.Errorf("branch builder source count for %q = %d, want %d", required, got, count)
 		}
 	}
 	for _, forbidden := range []string{"packages: write", "docker/login-action", "docker push", "docker manifest", "windows-native.yml", "run-windows-gui-container", "test-windows-desktop-msi-lifecycle"} {
-		if strings.Contains(prJob, forbidden) {
-			return fmt.Errorf("pull-request builder owns forbidden registry or validation source %q", forbidden)
+		if strings.Contains(branchJob, forbidden) {
+			return fmt.Errorf("branch builder owns forbidden registry or validation source %q", forbidden)
 		}
 	}
 	mainJob := builder[mainStart:manifestStart]
-	for _, required := range []string{"if: github.event_name == 'push' && github.ref == 'refs/heads/main'", "packages: write", "docker/login-action@v3", "docker manifest inspect $tag", "./scripts/build-windows-gui-builder-image.ps1", "& docker push $tag"} {
+	for _, required := range []string{"if: github.ref == 'refs/heads/main'", "packages: write", "docker/login-action@v3", "docker manifest inspect $tag", "./scripts/build-windows-gui-builder-image.ps1", "& docker push $tag"} {
 		if !strings.Contains(mainJob, required) {
 			return fmt.Errorf("main builder is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"workflow_dispatch", "uses: ./.github/workflows/windows-native.yml", "builder_image: ghcr.io/xiazy/notty-windows-builder:latest", "run-windows-gui-container", "test-windows-desktop-msi-lifecycle", "if docker manifest inspect \"$latest\"", "image=\"$EXACT_IMAGE\"", "runs-on: [self-hosted, Linux, ARM64]", "runs-on: [self-hosted, Linux, X64]", "runs-on: [self-hosted, Windows, ARM64]", "runs-on: [self-hosted, Windows, X64]", "image }}-arm64", "image }}-amd64", "\"$IMAGE-arm64\"", "\"$IMAGE-amd64\""} {
+	for _, forbidden := range []string{"pull_request:", "pull_request_target:", "uses: ./.github/workflows/windows-native.yml", "builder_image: ghcr.io/xiazy/notty-windows-builder:latest", "run-windows-gui-container", "test-windows-desktop-msi-lifecycle", "if docker manifest inspect \"$latest\"", "image=\"$EXACT_IMAGE\"", "runs-on: [self-hosted, Linux, ARM64]", "runs-on: [self-hosted, Linux, X64]", "runs-on: [self-hosted, Windows, ARM64]", "runs-on: [self-hosted, Windows, X64]", "image }}-arm64", "image }}-amd64", "\"$IMAGE-arm64\"", "\"$IMAGE-amd64\""} {
 		if strings.Contains(builder, forbidden) {
 			return fmt.Errorf("dedicated builder workflow contains forbidden trigger or fallback %q", forbidden)
 		}
