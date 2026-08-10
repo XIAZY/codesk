@@ -20,21 +20,24 @@
 #   * Fail loud on infrastructure absence — a skipped live-DB suite reporting green is the exact
 #     false-assurance class this pipeline exists to kill. The Postgres preflight fails if the DB is
 #     unreachable, and the skip-guard fails if the canary live-Postgres test does not actually PASS.
-#   * Base-freshness — `on: pull_request` checks out the PR *merge commit* (refs/pull/N/merge), so
-#     every gate runs against the merge result, not the stale branch head. Stale-base merges bit this
-#     project twice; this makes them a red check.
+#   * Runner trust — persistent self-hosted runners only execute pushes to branches in this repository.
+#     Fork pull requests never trigger this workflow. To test an external contribution, a maintainer
+#     must first review it and push the selected commit to a branch in this repository.
+#   * Base-freshness — update a branch from main before merging. CI validates the pushed branch head;
+#     it deliberately does not execute fork-controlled pull-request merge refs on persistent runners.
 
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches:
+      - "**"
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Cancel superseded PR runs; push-to-main runs are left alone so main history gets a complete gate.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Cancel superseded branch runs; main is left alone so its history gets a complete gate.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -310,7 +313,7 @@ jobs:
 
   windows-daemon:
     name: Windows daemon (native build + platform tests)
-    if: github.event_name == 'pull_request'
+    if: github.ref != 'refs/heads/main'
     permissions:
       contents: read
       packages: read
