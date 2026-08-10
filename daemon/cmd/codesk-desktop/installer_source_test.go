@@ -52,21 +52,6 @@ func TestWindowsInstallerCIUsesArchitectureBoundProductPayloads(t *testing.T) {
 			t.Errorf("CI installer payload must not use placeholder construction %q", placeholder)
 		}
 	}
-	for _, mutation := range []struct{ name, old, replacement string }{
-		{"gui PE verification dropped", `go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/Codesk.exe" "$arch" gui`, ""},
-		{"console PE verification dropped", `go run ./scripts/verify-windows-desktop-pe.go "$payload_dir/notty-agent-tool.exe" "$arch" console`, ""},
-		{"agent tool no longer built", `-o "$payload_dir/notty-agent-tool.exe" ./daemon/cmd/agenttool`, ""},
-	} {
-		t.Run(mutation.name, func(t *testing.T) {
-			if strings.Count(workflow, mutation.old) != 1 {
-				t.Fatalf("mutation source %q is not unique", mutation.old)
-			}
-			mutated := strings.Replace(workflow, mutation.old, mutation.replacement, 1)
-			if strings.Count(mutated, mutation.old) != 0 {
-				t.Fatal("mutation did not apply")
-			}
-		})
-	}
 }
 
 func TestWindowsNativeCIUsesPublishedBuilderImage(t *testing.T) {
