@@ -94,6 +94,9 @@ func TestSyncerConfigFieldMapping(t *testing.T) {
 	if cfg.DaemonToken != "secret-token" {
 		t.Errorf("DaemonToken = %q, want %q", cfg.DaemonToken, "secret-token")
 	}
+	if cfg.ClientKind != syncer.DaemonClientKindGUI {
+		t.Errorf("ClientKind = %q, want %q", cfg.ClientKind, syncer.DaemonClientKindGUI)
+	}
 	if cfg.DataDir != dirs.Data {
 		t.Errorf("DataDir = %q, want %q", cfg.DataDir, dirs.Data)
 	}

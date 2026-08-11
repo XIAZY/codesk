@@ -111,6 +111,7 @@ func initPostgresSchemaTables(db *sql.DB) error {
 			daemon_version TEXT NOT NULL DEFAULT '',
 			os TEXT NOT NULL DEFAULT '',
 			arch TEXT NOT NULL DEFAULT '',
+			client_kind TEXT NOT NULL DEFAULT '',
 			runtime_detections JSONB NOT NULL DEFAULT '[]'::jsonb,
 			last_seen_at TIMESTAMPTZ,
 			created_at TIMESTAMPTZ NOT NULL,
@@ -122,6 +123,9 @@ func initPostgresSchemaTables(db *sql.DB) error {
 				ON DELETE CASCADE
 		)
 		`,
+		// Idempotent column-add for databases created before daemons reported
+		// whether they run inside the desktop GUI or as the standalone CLI.
+		`ALTER TABLE daemons ADD COLUMN IF NOT EXISTS client_kind TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_daemons_workspace ON daemons (workspace_id, status)`,
 		`
 		CREATE TABLE IF NOT EXISTS documents (

@@ -2317,9 +2317,10 @@ func TestDaemonStatusCheckInPublishesDaemonUpdatedEvent(t *testing.T) {
 	defer unsubscribe()
 
 	authTestStatus(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
-		Version: "0.63.0",
-		OS:      "linux",
-		Arch:    "arm64",
+		Version:    "0.63.0",
+		OS:         "darwin",
+		Arch:       "arm64",
+		ClientKind: "gui",
 	}, http.StatusOK)
 
 	var updated *Daemon
@@ -2346,5 +2347,60 @@ func TestDaemonStatusCheckInPublishesDaemonUpdatedEvent(t *testing.T) {
 	}
 	if updated.ConnectionStatus != "online" {
 		t.Fatalf("daemon.updated must carry the fresh connectionStatus the UI renders, got %q want online", updated.ConnectionStatus)
+	}
+	if updated.OS != "darwin" || updated.ClientKind != "gui" {
+		t.Fatalf("daemon.updated must carry the reported OS/client kind, got os=%q clientKind=%q", updated.OS, updated.ClientKind)
+	}
+}
+
+func TestDaemonStatusPersistsClientKindAndLegacyHeartbeatPreservesIt(t *testing.T) {
+	_, router := newAuthTestServer(t)
+
+	owner := authTestRegister(t, router, "daemon-client-kind@example.com", "owner-pass", "Daemon Client Kind")
+	workspace := authTestCreateWorkspace(t, router, owner.Token, "Daemon Client Kind Tenant")
+
+	var daemonResponse CreateDaemonResponse
+	authTestJSON(t, router, http.MethodPost, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, CreateDaemonRequest{Name: "Install daemon"}, http.StatusCreated, &daemonResponse)
+
+	var statusResponse struct {
+		Daemon Daemon `json:"daemon"`
+	}
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version:    "0.64.0",
+		OS:         "windows",
+		Arch:       "amd64",
+		ClientKind: " gui ",
+	}, http.StatusOK, &statusResponse)
+	if statusResponse.Daemon.ClientKind != "gui" {
+		t.Fatalf("first status clientKind = %q, want gui", statusResponse.Daemon.ClientKind)
+	}
+
+	// A legacy daemon omits the additive field. It may refresh the same row after
+	// an upgrade/downgrade, but it must not erase a previously authoritative kind.
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version: "0.63.0",
+		OS:      "windows",
+		Arch:    "amd64",
+	}, http.StatusOK, &statusResponse)
+	if statusResponse.Daemon.ClientKind != "gui" {
+		t.Fatalf("legacy status erased clientKind: got %q, want gui", statusResponse.Daemon.ClientKind)
+	}
+
+	authTestJSON(t, router, http.MethodPatch, "/api/workspaces/"+workspace.ID+"/daemon/status", daemonResponse.Token, UpdateDaemonStatusRequest{
+		Version:    "0.64.0",
+		OS:         "windows",
+		Arch:       "amd64",
+		ClientKind: "cli",
+	}, http.StatusOK, &statusResponse)
+	if statusResponse.Daemon.ClientKind != "cli" {
+		t.Fatalf("replacement status clientKind = %q, want cli", statusResponse.Daemon.ClientKind)
+	}
+
+	var daemonList struct {
+		Daemons []*Daemon `json:"daemons"`
+	}
+	authTestJSON(t, router, http.MethodGet, "/api/workspaces/"+workspace.ID+"/daemons", owner.Token, nil, http.StatusOK, &daemonList)
+	if len(daemonList.Daemons) != 1 || daemonList.Daemons[0].ClientKind != "cli" {
+		t.Fatalf("daemon list did not preserve clientKind: %#v", daemonList.Daemons)
 	}
 }

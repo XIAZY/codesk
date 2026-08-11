@@ -1238,7 +1238,8 @@ describe("DaemonDetailModal live status", () => {
     expect(container.querySelector("pre.code")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Terminal" }));
-    expect(screen.getByRole("button", { name: "Windows" }).getAttribute("aria-pressed")).toBe("true");
+    // OS is already reported by this daemon, so even the legacy method fallback does not ask it.
+    expect(screen.queryByRole("group", { name: "Local environment operating system" })).toBeNull();
     expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.ps1");
 
     await user.click(screen.getByRole("button", { name: "Reinstall — run the reinstall script" }));
@@ -1246,6 +1247,92 @@ describe("DaemonDetailModal live status", () => {
       const commands = Array.from(container.querySelectorAll("pre.code"), (node) => node.textContent ?? "");
       expect(commands.some((c) => c.includes("uninstall.ps1") && c.includes("install.ps1") && c.includes("nottyd_fresh"))).toBe(true);
     });
+  });
+
+  it("#23 reported CLI + OS bypasses both management questions and shows the exact terminal path", () => {
+    const daemon = withReceipt({
+      ...daemonFixtures.justSeen,
+      id: "d1",
+      os: "windows",
+      arch: "amd64",
+      clientKind: "cli",
+    }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Install method" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Local environment operating system" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Reinstall — run the reinstall script" })).toBeTruthy();
+    expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.ps1");
+  });
+
+  it("#23 reported GUI bypasses the install-method question and shows OS-native app steps", () => {
+    const daemon = withReceipt({
+      ...daemonFixtures.justSeen,
+      id: "d1",
+      os: "windows",
+      arch: "amd64",
+      clientKind: "gui",
+    }, Date.now());
+    const api = { createDaemonReinstallToken: vi.fn() };
+    const props = { api: api as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Install method" })).toBeNull();
+    expect(screen.getByText(/Settings → Apps → Codesk → Uninstall/)).toBeTruthy();
+    expect(container.querySelector("pre.code")).toBeNull();
+    expect(api.createDaemonReinstallToken).not.toHaveBeenCalled();
+  });
+
+  it("#23 keeps the OS fallback only when the daemon has not reported an OS", () => {
+    const daemon = withReceipt({
+      ...daemonFixtures.justSeen,
+      id: "d1",
+      os: "",
+      arch: "amd64",
+      clientKind: "cli",
+    }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    render(<DaemonDetailModal {...props} daemons={[daemon]} />);
+
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(screen.getByRole("group", { name: "Local environment operating system" })).toBeTruthy();
+  });
+
+  it("#23 consumes a live client-kind report without reopening the management modal", () => {
+    const legacy = withReceipt({
+      ...daemonFixtures.justSeen,
+      id: "d1",
+      os: "windows",
+      arch: "amd64",
+    }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { rerender } = render(<DaemonDetailModal {...props} daemons={[legacy]} />);
+    expect(screen.getByText("How did you install Codesk on this computer?")).toBeTruthy();
+
+    rerender(<DaemonDetailModal {...props} daemons={[{ ...legacy, clientKind: "gui" }]} />);
+    expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(screen.getByText(/Settings → Apps → Codesk → Uninstall/)).toBeTruthy();
+  });
+
+  it("#23 keeps the legacy method fallback neutral when a live OS report enables app choices", () => {
+    const unknown = withReceipt({
+      ...daemonFixtures.justSeen,
+      id: "d1",
+      os: "",
+      arch: "amd64",
+    }, Date.now());
+    const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
+    const { rerender } = render(<DaemonDetailModal {...props} daemons={[unknown]} />);
+    expect(screen.queryByRole("group", { name: "Install method" })).toBeNull();
+
+    rerender(<DaemonDetailModal {...props} daemons={[{ ...unknown, os: "windows" }]} />);
+    expect(screen.getByRole("group", { name: "Install method" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Desktop app" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Terminal" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("group", { name: "Local environment operating system" })).toBeNull();
   });
 
   it("#63 windows: Desktop app shows OS-native uninstall steps (Settings → Apps), NO script and NO token", async () => {
@@ -1288,12 +1375,13 @@ describe("DaemonDetailModal live status", () => {
   });
 
   it("#63 linux: skips the install-method question and shows the terminal uninstall script directly", () => {
-    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux" }, Date.now());
+    const daemon = withReceipt({ ...daemonFixtures.justSeen, id: "d1", os: "linux", clientKind: "cli" }, Date.now());
     const props = { api: {} as never, workspaceId: "ws", daemonId: "d1", agents: [], runs: [], agentEvents: [], onClose: vi.fn(), onChanged: vi.fn() };
     const { container } = render(<DaemonDetailModal {...props} daemons={[daemon]} />);
 
-    // No desktop app on Linux → no question, terminal is the direct honest path.
+    // Both fields are reported: no method or OS question, terminal is the direct honest path.
     expect(screen.queryByText("How did you install Codesk on this computer?")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Local environment operating system" })).toBeNull();
     expect(container.querySelector("pre.code")?.textContent).toContain("uninstall.sh");
   });
 

@@ -78,7 +78,10 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	if gotAuth != "Bearer daemon_token" {
 		t.Fatalf("expected daemon bearer auth, got %q", gotAuth)
 	}
-	if gotPayload.Version != "0.62.0" || gotPayload.OS != runtime.GOOS || gotPayload.Arch != runtime.GOARCH {
+	if gotPayload.Version != "0.62.0" ||
+		gotPayload.OS != runtime.GOOS ||
+		gotPayload.Arch != runtime.GOARCH ||
+		gotPayload.ClientKind != DaemonClientKindCLI {
 		t.Fatalf("unexpected daemon status payload: %#v", gotPayload)
 	}
 	if len(gotPayload.Runtimes) != 1 || gotPayload.Runtimes[0].Kind != RuntimeCodex || !gotPayload.Runtimes[0].Available {
@@ -112,6 +115,12 @@ func TestDaemonStatusReporterSendsRuntimeDetections(t *testing.T) {
 	}
 	if _, ok := runtimePayload["model_catalog"]; ok {
 		t.Fatalf("raw runtime payload emitted model_catalog drift: %#v", runtimePayload)
+	}
+	if raw["clientKind"] != string(DaemonClientKindCLI) {
+		t.Fatalf("raw status payload clientKind = %#v, want %q", raw["clientKind"], DaemonClientKindCLI)
+	}
+	if _, ok := raw["client_kind"]; ok {
+		t.Fatalf("raw status payload emitted client_kind drift: %#v", raw)
 	}
 }
 
