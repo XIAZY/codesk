@@ -118,6 +118,39 @@ grep -q 'vite_desktop_static_base="${VITE_DESKTOP_STATIC_BASE:-${NOTTY_DESKTOP_S
 	fail 'build-frontend.sh does not derive the desktop static base from the static origin'
 pass 'frontend build forwards the desktop static base (VITE_DESKTOP_STATIC_BASE)'
 
+frontend_fixture="$tmp_dir/frontend-fixture"
+frontend_fake_bin="$tmp_dir/frontend-fake-bin"
+frontend_npm_log="$tmp_dir/frontend-npm.log"
+mkdir -p \
+	"$frontend_fixture/scripts/lib" \
+	"$frontend_fixture/frontend/node_modules" \
+	"$frontend_fixture/frontend/dist" \
+	"$frontend_fixture/homepage" \
+	"$frontend_fake_bin"
+cp "$repo_dir/scripts/build-frontend.sh" "$frontend_fixture/scripts/build-frontend.sh"
+cp "$repo_dir/scripts/build-homepage.sh" "$frontend_fixture/scripts/build-homepage.sh"
+cp "$repo_dir/scripts/lib/deploy-env.sh" "$frontend_fixture/scripts/lib/deploy-env.sh"
+printf '<html>app</html>\n' >"$frontend_fixture/frontend/dist/index.html"
+printf '<html>home</html>\n' >"$frontend_fixture/homepage/index.html"
+cat >"$frontend_fake_bin/npm" <<'FIXTURE'
+#!/usr/bin/env sh
+set -eu
+printf '%s\n' "$*" >>"$FRONTEND_NPM_LOG"
+case "$*" in
+	ci|'run build') ;;
+	*) exit 64 ;;
+esac
+FIXTURE
+chmod +x "$frontend_fake_bin/npm"
+PATH="$frontend_fake_bin:$PATH" FRONTEND_NPM_LOG="$frontend_npm_log" \
+	"$frontend_fixture/scripts/build-frontend.sh" >/dev/null
+[ "$(cat "$frontend_npm_log")" = "$(printf 'ci\nrun build')" ] ||
+	fail 'frontend build did not install the lockfile before building with pre-existing node_modules'
+[ -f "$frontend_fixture/dist/static/app/index.html" ] &&
+	[ -f "$frontend_fixture/dist/static/homepage/index.html" ] ||
+	fail 'frontend lockfile-install fixture did not stage both static sites'
+pass 'frontend build installs the lockfile before every production build'
+
 build_fixture="$tmp_dir/build-fixture"
 mkdir -p "$build_fixture/scripts" "$build_fixture/deploy/daemons"
 cp "$repo_dir/scripts/build-daemon-platform.sh" "$build_fixture/scripts/build-daemon-platform.sh"

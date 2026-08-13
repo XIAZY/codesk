@@ -24,9 +24,7 @@ mkdir -p "$app_out"
 
 (
 	cd "$root_dir/frontend"
-	if [ "${RUN_NPM_CI:-0}" = "1" ] || [ ! -d node_modules ]; then
-		npm ci
-	fi
+	npm ci
 	VITE_PUBLIC_ORIGIN="$vite_public_origin" \
 		VITE_API_BASE="$vite_api_base" \
 		VITE_DAEMON_STATIC_BASE="$vite_daemon_static_base" \
