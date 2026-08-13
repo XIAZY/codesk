@@ -30,3 +30,22 @@ export async function dismissOnboarding(page: Page): Promise<void> {
     return; // neither onboarding surface visible — teardown complete
   }
 }
+
+export async function expectDocumentPersisted(page: Page, content: string): Promise<void> {
+  const observer = await page.context().newPage();
+  try {
+    await observer.goto(page.url());
+    await dismissOnboarding(observer);
+    const editor = observer.locator(".cm-editor").first();
+    await expect(editor).toBeVisible({ timeout: 20_000 });
+    // A second websocket subscriber receives updates only after the backend has
+    // applied them. Unlike the always-visible "Live" chip, this proves the
+    // current content survived beyond the writer's local Y.Doc.
+    await expect.poll(
+      () => editor.locator(".cm-line").allTextContents(),
+      { timeout: 20_000 },
+    ).toEqual(content.split("\n"));
+  } finally {
+    await observer.close();
+  }
+}

@@ -1,7 +1,7 @@
 import { test, expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { dismissOnboarding } from "../utils";
+import { dismissOnboarding, expectDocumentPersisted } from "../utils";
 
 type Seed = {
   email: string;
@@ -67,7 +67,7 @@ async function createDocument(page: Page, content: string): Promise<Locator> {
     await page.keyboard.type(content);
     await expect(editor).toContainText(content);
   }
-  await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
+  await expectDocumentPersisted(page, content);
   return editor;
 }
 
@@ -167,7 +167,6 @@ test("thread popover: marker → detail → reply persists through a real reload
   await dismissOnboarding(page);
   await expect(editor).toBeVisible({ timeout: 20_000 });
   await expect(editor).toContainText("thread popover regression", { timeout: 20_000 });
-  await expect(page.locator(".doc-meta-row .chip.ok")).toBeVisible({ timeout: 15_000 });
   detail = await openThreadDetail(page, 1, initial);
   await expect(detail.locator(".thread-popover-message-body").getByText(reply, { exact: true })).toBeVisible();
 
@@ -293,7 +292,10 @@ test("thread popover: mobile sheet keeps fixed regions reachable and scrolls mes
 test("thread popover: desktop float stays contained near viewport edges and in a short window", async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   const lineCount = 28;
-  const content = Array.from({ length: lineCount }, (_, index) => `containment line ${index + 1}`).join("\n");
+  const lines = Array.from({ length: lineCount }, (_, index) => `containment line ${index + 1}`);
+  lines[0] = "  containment  line 1";
+  lines[13] = "containment line 14  ";
+  const content = lines.join("\n");
   const body = `desktop overflow ${"message ".repeat(220)}`;
   const { errors } = await setupThreadDocument(page, [body], content, lineCount);
   await page.setViewportSize({ width: 720, height: 360 });
