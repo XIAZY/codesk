@@ -1,11 +1,11 @@
 module notty
 
-go 1.23
+go 1.24
 
 require (
 	fyne.io/systray v1.12.2
 	github.com/fsnotify/fsnotify v1.8.0
-	github.com/go-chi/chi/v5 v5.2.1
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.2
